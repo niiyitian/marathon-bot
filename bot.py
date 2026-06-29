@@ -203,7 +203,8 @@ def main_menu_keyboard():
             ["✅ Log Complete", "📷 Upload Activity"],
             ["✏️ Edit Thursday", "✏️ Edit Tuesday"],
             ["📊 My Progress", "🔮 Predictions"],
-            ["📋 Week Summary", "🆘 Help"],
+            ["📋 Week Summary", "👟 Gear Tracker"],
+            ["🏁 Race Debrief", "🆘 Help"],
         ],
         resize_keyboard=True
     )
@@ -650,42 +651,58 @@ async def edit_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ── Race time predictor ───────────────────────────────────────────────
+# Actual Strava best efforts (as of Jun 2026)
+BEST_EFFORTS = {
+    "400m": "1:48",
+    "1K": "5:20",
+    "5K": "30:23",
+    "10K": "1:05:48",
+    "HM": "2:27:45",
+}
+
+def time_to_sec(t: str) -> float:
+    parts = t.split(":")
+    if len(parts) == 2:
+        return int(parts[0]) * 60 + float(parts[1])
+    return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+
+def sec_to_hms(s: float) -> str:
+    h = int(s // 3600)
+    m = int((s % 3600) // 60)
+    sec = int(s % 60)
+    if h > 0:
+        return f"{h}:{m:02d}:{sec:02d}"
+    return f"{m}:{sec:02d}"
+
 def predict_race_times(data: dict) -> tuple:
     """
-    Estimate HM and FM finish times based on completed sessions.
-    Uses best recent track pace as a proxy for VO2max pace,
-    then applies Riegel formula and Singapore heat adjustment.
+    Estimate HM and FM finish times using Riegel formula from best 10K,
+    adjusted for training progression and Singapore heat.
     """
     completed = data.get("completed", {})
-    logs = data.get("logs", {})
+    weeks_trained = len(set(re.match(r"(w\d+)_", uid).group(1) for uid in completed if re.match(r"w\d+_", uid))) if completed else 0
 
-    # Gather track sessions completed — these have the best pace signal
-    track_sessions = [uid for uid in completed if "thu" in uid and "track" in get_session(uid)[2].lower() if get_session(uid)]
+    # Base from actual 10K PB: 1:05:48
+    base_10k_sec = time_to_sec("1:05:48")
 
-    # Base prediction from training week progression
-    # Week 1 baseline: track pace ~6:00/km = VO2max ~5:45 after warmup
-    # Each 4 weeks of consistent training = ~5-8 sec/km improvement
-    weeks_trained = len(set(uid[:3] for uid in completed if re.match(r"w\d+", uid)))
+    # Training improvement: ~3 sec/km per 4 weeks consistent training
+    # Each completed week contributes a small improvement
+    improvement_per_km = min(weeks_trained, 20) * 0.75  # seconds per km
+    adjusted_10k_sec = base_10k_sec - (improvement_per_km * 10)
 
-    # Starting base: conservative for week 1 fitness seen in logs
-    # 5:59/km track effort → ~6:24/km HM pace → ~2:15 HM
-    base_hm_pace_sec = 384  # 6:24/km in seconds
+    # Riegel: HM = 10K * (21.1/10)^1.06
+    hm_sec = adjusted_10k_sec * (21.1 / 10) ** 1.06
 
-    # Improvement: ~6 sec/km per 4 weeks of consistent training, capped at 20 weeks
-    improvement = min(weeks_trained, 20) * 1.5  # seconds per km
-    hm_pace_sec = base_hm_pace_sec - improvement
+    # Singapore heat penalty on race day: +5 sec/km = +105 sec for HM
+    hm_sec_race = hm_sec + 105
 
-    # Singapore heat penalty: +8 sec/km on race day
-    hm_pace_with_heat = hm_pace_sec + 8
+    # FM via Riegel from adjusted HM
+    fm_sec_race = hm_sec_race * (42.2 / 21.1) ** 1.06
 
-    hm_time_sec = hm_pace_with_heat * 21.1
-    hm_h = int(hm_time_sec // 3600)
-    hm_m = int((hm_time_sec % 3600) // 60)
-
-    # FM via Riegel: FM = HM * (42.2/21.1)^1.06
-    fm_time_sec = hm_time_sec * (42.2 / 21.1) ** 1.06
-    fm_h = int(fm_time_sec // 3600)
-    fm_m = int((fm_time_sec % 3600) // 60)
+    hm_h = int(hm_sec_race // 3600)
+    hm_m = int((hm_sec_race % 3600) // 60)
+    fm_h = int(fm_sec_race // 3600)
+    fm_m = int((fm_sec_race % 3600) // 60)
 
     return (hm_h, hm_m), (fm_h, fm_m), weeks_trained
 
@@ -715,17 +732,18 @@ async def show_predictions(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     text = (
         f"🔮 *Race Time Predictions*\n"
-        f"_(based on {weeks} weeks of training, Singapore heat adjusted)_\n\n"
+        f"_(based on 10K PB {BEST_EFFORTS['10K']}, {weeks} weeks trained, SG heat adjusted)_\n\n"
+        f"*Current PBs:*\n"
+        f"5K: {BEST_EFFORTS['5K']} · 10K: {BEST_EFFORTS['10K']} · HM: {BEST_EFFORTS['HM']}\n\n"
         f"🏃 *Half Marathon (21.1km)*\n"
         f"Predicted: *{hm_h}:{hm_m:02d}*\n"
-        f"Target: 2:15 → {hm_gap_text}\n\n"
+        f"Sep 27 target: 2:15 → {hm_gap_text}\n\n"
         f"🏅 *Full Marathon (42.2km)*\n"
         f"Predicted: *{fm_h}:{fm_m:02d}*\n"
-        f"Target: sub-5:00 → {fm_gap_text}\n\n"
-        f"*Sep 27 HM target:* 2:10–2:15 — on track ✅\n"
-        f"*Nov 1 HM target:* 2:10 — achievable if Sep goes well ✅\n"
+        f"Dec 6 target: sub-5:00 → {fm_gap_text}\n\n"
+        f"*Nov 1 HM:* targeting 2:10 — needs strong Sep race + 5 more weeks\n"
         f"{conflict_warning}\n"
-        f"_Predictions improve as more sessions are logged._"
+        f"_Predictions improve as more sessions are logged and PBs update._"
     )
 
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_menu_keyboard())
@@ -854,6 +872,241 @@ async def show_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         reply_markup=main_menu_keyboard()
     )
 
+# ── Gear tracker ─────────────────────────────────────────────────────
+DEFAULT_SHOES = {
+    "superblast2": {"name": "ASICS Superblast 2", "km": 293.0, "limit": 500, "type": "Training"},
+    "cloudmonster": {"name": "On CloudMonster Hyper", "km": 174.2, "limit": 400, "type": "Race/Tempo"},
+    "endorphin": {"name": "Saucony Endorphin Speed", "km": 18.9, "limit": 500, "type": "Race"},
+    "evosl": {"name": "Adidas Evo SL", "km": 77.6, "limit": 400, "type": "Race"},
+}
+
+def get_shoes(data: dict) -> dict:
+    if "shoes" not in data:
+        data["shoes"] = DEFAULT_SHOES.copy()
+    return data["shoes"]
+
+def shoe_bar(km, limit):
+    pct = min(km / limit, 1.0)
+    filled = int(pct * 10)
+    bar = "█" * filled + "░" * (10 - filled)
+    return f"{bar} {km:.0f}/{limit}km"
+
+async def show_gear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    data = load_data()
+    shoes = get_shoes(data)
+    save_data(data)
+
+    text = "👟 *Gear Tracker*\n\n"
+    buttons = []
+    for sid, shoe in shoes.items():
+        km = shoe["km"]
+        limit = shoe["limit"]
+        pct = km / limit * 100
+        warn = " ⚠️" if pct >= 80 else ""
+        text += f"*{shoe['name']}*{warn}\n"
+        text += f"{shoe_bar(km, limit)}\n"
+        text += f"_{shoe['type']} · {pct:.0f}% used_\n\n"
+        buttons.append([InlineKeyboardButton(f"➕ Log km — {shoe['name'][:25]}", callback_data=f"gear_log|{sid}")])
+
+    buttons.append([InlineKeyboardButton("➕ Add new shoe", callback_data="gear_add")])
+
+    await update.message.reply_text(
+        text, parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+async def cb_gear_log(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, sid = query.data.split("|")
+    ctx.user_data["gear_log_sid"] = sid
+    data = load_data()
+    shoes = get_shoes(data)
+    shoe = shoes.get(sid, {})
+    await query.edit_message_text(
+        f"👟 *{shoe.get('name', sid)}*\n\nCurrent: {shoe.get('km', 0):.0f}km\n\nHow many km did you run in these? (e.g. `8.6`)\n\nSend /cancel to abort.",
+        parse_mode="Markdown"
+    )
+    return "GEAR_ENTER_KM"
+
+async def cb_gear_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    ctx.user_data["gear_adding"] = True
+    await query.edit_message_text(
+        "👟 *Add new shoe*\n\nSend the shoe name and km limit in this format:\n`Nike Vaporfly 5, 400`\n\n(name, km limit)\n\nSend /cancel to abort.",
+        parse_mode="Markdown"
+    )
+    return "GEAR_ADD_SHOE"
+
+async def gear_enter_km(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    sid = ctx.user_data.get("gear_log_sid")
+    if not sid:
+        return ConversationHandler.END
+    try:
+        km_added = float(update.message.text.strip().replace(",", "."))
+    except ValueError:
+        await update.message.reply_text("Please send a number like `8.6`", parse_mode="Markdown")
+        return "GEAR_ENTER_KM"
+
+    data = load_data()
+    shoes = get_shoes(data)
+    shoes[sid]["km"] = round(shoes[sid]["km"] + km_added, 1)
+    save_data(data)
+
+    shoe = shoes[sid]
+    pct = shoe["km"] / shoe["limit"] * 100
+    warn = "\n⚠️ *Over 80% — consider retiring soon.*" if pct >= 80 else ""
+    await update.message.reply_text(
+        f"✅ Logged {km_added}km on *{shoe['name']}*\n"
+        f"Total: {shoe['km']:.0f}/{shoe['limit']}km ({pct:.0f}%){warn}",
+        parse_mode="Markdown", reply_markup=main_menu_keyboard()
+    )
+    ctx.user_data.pop("gear_log_sid", None)
+    return ConversationHandler.END
+
+async def gear_add_shoe(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        parts = update.message.text.strip().split(",")
+        name = parts[0].strip()
+        limit = int(parts[1].strip())
+    except (IndexError, ValueError):
+        await update.message.reply_text("Format: `Nike Vaporfly 5, 400`", parse_mode="Markdown")
+        return "GEAR_ADD_SHOE"
+
+    sid = re.sub(r"[^a-z0-9]", "", name.lower())[:12]
+    data = load_data()
+    shoes = get_shoes(data)
+    shoes[sid] = {"name": name, "km": 0, "limit": limit, "type": "Training"}
+    save_data(data)
+
+    await update.message.reply_text(
+        f"✅ Added *{name}* (limit: {limit}km)",
+        parse_mode="Markdown", reply_markup=main_menu_keyboard()
+    )
+    return ConversationHandler.END
+
+async def gear_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Cancelled.", reply_markup=main_menu_keyboard())
+    return ConversationHandler.END
+
+# ── Race debrief ──────────────────────────────────────────────────────
+RACE_SESSIONS = [
+    ("w14_sat", "Sep 27 Half Marathon"),
+    ("w19_sat", "Nov 1 Half Marathon"),
+    ("w24_sun", "Dec 6 BYD Full Marathon"),
+]
+
+DEBRIEF_PICK, DEBRIEF_TIME, DEBRIEF_EFFORT, DEBRIEF_PACING, DEBRIEF_NUTRITION, DEBRIEF_NOTES = range(20, 26)
+
+async def race_debrief_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    buttons = [[InlineKeyboardButton(name, callback_data=f"debrief|{uid}")] for uid, name in RACE_SESSIONS]
+    await update.message.reply_text(
+        "🏁 *Race Debrief*\n\nWhich race do you want to debrief?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+async def cb_debrief_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, uid = query.data.split("|")
+    name = next((n for u, n in RACE_SESSIONS if u == uid), uid)
+    ctx.user_data["debrief_uid"] = uid
+    ctx.user_data["debrief_name"] = name
+    ctx.user_data["debrief"] = {}
+    await query.edit_message_text(
+        f"🏁 *{name} Debrief*\n\nWhat was your finish time? (e.g. `2:18:45` or `2:18`)",
+        parse_mode="Markdown"
+    )
+    return DEBRIEF_TIME
+
+async def debrief_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["debrief"]["time"] = update.message.text.strip()
+    buttons = [[InlineKeyboardButton(str(i), callback_data=f"def|{i}")] for i in range(1, 11)]
+    # arrange in 2 rows of 5
+    rows = [buttons[i:i+5] for i in range(0, 10, 5)]
+    await update.message.reply_text(
+        "How would you rate your overall effort? (1 = easy, 10 = max effort)",
+        reply_markup=InlineKeyboardMarkup(rows)
+    )
+    return DEBRIEF_EFFORT
+
+async def cb_debrief_effort(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, val = query.data.split("|")
+    ctx.user_data["debrief"]["effort"] = val
+    await query.edit_message_text(
+        "How was your pacing?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🐇 Went out too fast", callback_data="pac|fast")],
+            [InlineKeyboardButton("✅ Executed perfectly", callback_data="pac|perfect")],
+            [InlineKeyboardButton("🐢 Too conservative", callback_data="pac|slow")],
+        ])
+    )
+    return DEBRIEF_PACING
+
+async def cb_debrief_pacing(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, val = query.data.split("|")
+    ctx.user_data["debrief"]["pacing"] = {"fast": "Went out too fast", "perfect": "Perfect execution", "slow": "Too conservative"}[val]
+    await query.edit_message_text(
+        "How was your nutrition/fuelling?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Fuelled well", callback_data="nut|good")],
+            [InlineKeyboardButton("😵 Bonked / ran out of energy", callback_data="nut|bonked")],
+            [InlineKeyboardButton("🤢 GI issues", callback_data="nut|gi")],
+            [InlineKeyboardButton("⬜ Didn't fuel (short race)", callback_data="nut|none")],
+        ])
+    )
+    return DEBRIEF_NUTRITION
+
+async def cb_debrief_nutrition(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, val = query.data.split("|")
+    ctx.user_data["debrief"]["nutrition"] = {"good": "Fuelled well", "bonked": "Bonked", "gi": "GI issues", "none": "No fuelling needed"}[val]
+    await query.edit_message_text(
+        "Any notes? What went well, what to improve? (or send `-` to skip)"
+    )
+    return DEBRIEF_NOTES
+
+async def debrief_notes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    notes = update.message.text.strip()
+    if notes == "-":
+        notes = ""
+    ctx.user_data["debrief"]["notes"] = notes
+
+    uid = ctx.user_data["debrief_uid"]
+    name = ctx.user_data["debrief_name"]
+    d = ctx.user_data["debrief"]
+
+    data = load_data()
+    data.setdefault("debriefs", {})[uid] = {**d, "date": today_str()}
+    save_data(data)
+
+    summary = (
+        f"🏁 *{name} — Debrief Saved*\n\n"
+        f"⏱ Finish time: *{d.get('time', '—')}*\n"
+        f"💪 Effort: {d.get('effort', '—')}/10\n"
+        f"📈 Pacing: {d.get('pacing', '—')}\n"
+        f"🍌 Nutrition: {d.get('nutrition', '—')}\n"
+    )
+    if notes:
+        summary += f"📝 Notes: _{notes}_\n"
+
+    await update.message.reply_text(summary, parse_mode="Markdown", reply_markup=main_menu_keyboard())
+    ctx.user_data.pop("debrief", None)
+    ctx.user_data.pop("debrief_uid", None)
+    ctx.user_data.pop("debrief_name", None)
+    return ConversationHandler.END
+
+async def debrief_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Debrief cancelled.", reply_markup=main_menu_keyboard())
+    return ConversationHandler.END
+
 # ── Text router ──────────────────────────────────────────────────────
 async def text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -875,6 +1128,10 @@ async def text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_predictions(update, ctx)
     elif text == "📋 Week Summary":
         await show_weekly_summary(update, ctx)
+    elif text == "👟 Gear Tracker":
+        await show_gear(update, ctx)
+    elif text == "🏁 Race Debrief":
+        await race_debrief_start(update, ctx)
     elif text == "🆘 Help":
         await show_help(update, ctx)
     else:
@@ -900,6 +1157,34 @@ def main():
         per_message=False,
     )
 
+    # Gear tracker conversation
+    gear_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(cb_gear_log, pattern=r"^gear_log\|"),
+            CallbackQueryHandler(cb_gear_add, pattern=r"^gear_add$"),
+        ],
+        states={
+            "GEAR_ENTER_KM": [MessageHandler(filters.TEXT & ~filters.COMMAND, gear_enter_km)],
+            "GEAR_ADD_SHOE": [MessageHandler(filters.TEXT & ~filters.COMMAND, gear_add_shoe)],
+        },
+        fallbacks=[CommandHandler("cancel", gear_cancel)],
+        per_message=False,
+    )
+
+    # Race debrief conversation
+    debrief_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_debrief_pick, pattern=r"^debrief\|")],
+        states={
+            DEBRIEF_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, debrief_time)],
+            DEBRIEF_EFFORT: [CallbackQueryHandler(cb_debrief_effort, pattern=r"^def\|")],
+            DEBRIEF_PACING: [CallbackQueryHandler(cb_debrief_pacing, pattern=r"^pac\|")],
+            DEBRIEF_NUTRITION: [CallbackQueryHandler(cb_debrief_nutrition, pattern=r"^nut\|")],
+            DEBRIEF_NOTES: [MessageHandler(filters.TEXT & ~filters.COMMAND, debrief_notes)],
+        },
+        fallbacks=[CommandHandler("cancel", debrief_cancel)],
+        per_message=False,
+    )
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("week", show_this_week))
     app.add_handler(CommandHandler("plan", show_full_plan))
@@ -907,6 +1192,8 @@ def main():
     app.add_handler(CommandHandler("help", show_help))
 
     app.add_handler(edit_conv)
+    app.add_handler(gear_conv)
+    app.add_handler(debrief_conv)
 
     app.add_handler(CallbackQueryHandler(cb_week, pattern=r"^week\|"))
     app.add_handler(CallbackQueryHandler(cb_toggle, pattern=r"^toggle\|"))
