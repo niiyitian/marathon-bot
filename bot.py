@@ -204,7 +204,8 @@ def main_menu_keyboard():
             ["✏️ Edit Thursday", "✏️ Edit Tuesday"],
             ["📊 My Progress", "🔮 Predictions"],
             ["📋 Week Summary", "👟 Gear Tracker"],
-            ["🏁 Race Debrief", "🆘 Help"],
+            ["🏁 Race Debrief", "🗓 Race Manager"],
+            ["🆘 Help"],
         ],
         resize_keyboard=True
     )
@@ -502,6 +503,32 @@ async def analyse_with_claude(image_bytes: bytes, session_summary: str, session_
         return ""
 
 
+async def extract_distance_from_image(image_bytes: bytes) -> float:
+    """Ask Claude to extract just the distance from the activity screenshot."""
+    if not ANTHROPIC_KEY:
+        return 0.0
+    b64 = base64.standard_b64encode(image_bytes).decode()
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                json={
+                    "model": "claude-sonnet-4-6",
+                    "max_tokens": 50,
+                    "messages": [{"role": "user", "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                        {"type": "text", "text": "What is the distance of this activity in km? Reply with just the number, e.g. 8.61. If not visible, reply 0."}
+                    ]}]
+                }
+            )
+        text = resp.json()["content"][0]["text"].strip()
+        return float(re.search(r"[\d.]+", text).group())
+    except Exception as e:
+        logger.error(f"Distance extract failed: {e}")
+        return 0.0
+
+
 async def receive_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = ctx.user_data.get("upload_uid")
     if not uid:
@@ -539,7 +566,6 @@ async def receive_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "date": today_str(),
         "caption": caption
     }
-
     save_data(data)
     ctx.user_data.pop("upload_uid", None)
 
@@ -549,12 +575,14 @@ async def receive_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         reply_markup=main_menu_keyboard()
     )
 
-    # Download photo and analyse
+    # Download photo bytes once — use for both analysis and distance extraction
+    tg_file = await update.message.photo[-1].get_file()
+    image_bytes = bytes(await tg_file.download_as_bytearray())
+
+    # Run coach analysis
     if ANTHROPIC_KEY:
         try:
-            tg_file = await update.message.photo[-1].get_file()
-            image_bytes = await tg_file.download_as_bytearray()
-            analysis = await analyse_with_claude(bytes(image_bytes), name, desc)
+            analysis = await analyse_with_claude(image_bytes, name, desc)
             if analysis:
                 await update.message.reply_text(
                     f"🤖 *Coach Analysis*\n\n{analysis}",
@@ -562,9 +590,55 @@ async def receive_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 )
         except Exception as e:
             logger.error(f"Photo analysis error: {e}")
+
+        # Extract distance and ask which shoe
+        try:
+            km = await extract_distance_from_image(image_bytes)
+            if km > 0:
+                ctx.user_data["auto_gear_km"] = km
+                shoes = get_shoes(data)
+                buttons = []
+                for sid, shoe in shoes.items():
+                    buttons.append([InlineKeyboardButton(
+                        f"{shoe['name']} ({shoe['km']:.0f}km)",
+                        callback_data=f"autogear|{sid}|{km}"
+                    )])
+                buttons.append([InlineKeyboardButton("⬜ Skip gear tracking", callback_data="autogear|skip|0")])
+                await update.message.reply_text(
+                    f"👟 *Which shoes did you wear?*\n_{km:.1f}km will be added to your choice._",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(buttons)
+                )
+        except Exception as e:
+            logger.error(f"Gear auto-log error: {e}")
     else:
         await update.message.reply_text(
             "💡 _Tip: Set ANTHROPIC\\_API\\_KEY when starting the bot to get AI run analysis!_",
+            parse_mode="Markdown"
+        )
+
+
+async def cb_autogear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split("|")
+    sid = parts[1]
+    km = float(parts[2])
+
+    if sid == "skip":
+        await query.edit_message_text("Gear tracking skipped.")
+        return
+
+    data = load_data()
+    shoes = get_shoes(data)
+    if sid in shoes:
+        shoes[sid]["km"] = round(shoes[sid]["km"] + km, 1)
+        save_data(data)
+        shoe = shoes[sid]
+        pct = shoe["km"] / shoe["limit"] * 100
+        warn = "\n⚠️ Over 80% — consider retiring soon." if pct >= 80 else ""
+        await query.edit_message_text(
+            f"👟 Added {km:.1f}km to *{shoe['name']}*\nTotal: {shoe['km']:.0f}/{shoe['limit']}km ({pct:.0f}%){warn}",
             parse_mode="Markdown"
         )
 
@@ -1107,6 +1181,103 @@ async def debrief_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Debrief cancelled.", reply_markup=main_menu_keyboard())
     return ConversationHandler.END
 
+# ── Race manager ─────────────────────────────────────────────────────
+RACE_ADD_NAME, RACE_ADD_DATE, RACE_ADD_TARGET = range(30, 33)
+
+async def show_race_manager(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    data = load_data()
+    custom_races = data.get("custom_races", [])
+
+    # Built-in races
+    builtin = [
+        ("Sep 27", "Half Marathon", "Target 2:15"),
+        ("Nov 1", "Half Marathon", "Marathon effort 2:28"),
+        ("Nov 26", "Hyrox Women Doubles", "10 days before marathon"),
+        ("Dec 5", "Pacing HM @ 2:45", "⚠️ Day before marathon"),
+        ("Dec 6", "BYD Full Marathon", "Target sub-5:00 🏅"),
+    ]
+
+    text = "🗓 *Race Manager*\n\n*Built-in races:*\n"
+    for date_str, name, note in builtin:
+        text += f"• {date_str}: {name} — _{note}_\n"
+
+    if custom_races:
+        text += "\n*Your custom races:*\n"
+        buttons = []
+        for i, r in enumerate(custom_races):
+            text += f"• {r['date']}: {r['name']} — _{r.get('target', '')}_\n"
+            buttons.append([InlineKeyboardButton(f"🗑 Remove: {r['name'][:30]}", callback_data=f"race_remove|{i}")])
+    else:
+        buttons = []
+
+    buttons.append([InlineKeyboardButton("➕ Add a race", callback_data="race_add")])
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+
+async def cb_race_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "🗓 *Add a race*\n\nWhat's the race name? (e.g. `Jurong Lake Runs 10K`)\n\nSend /cancel to abort.",
+        parse_mode="Markdown"
+    )
+    return RACE_ADD_NAME
+
+async def race_add_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["new_race_name"] = update.message.text.strip()
+    await update.message.reply_text(
+        "📅 What's the race date? (e.g. `2026-08-23`)",
+        parse_mode="Markdown"
+    )
+    return RACE_ADD_DATE
+
+async def race_add_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    date_str = update.message.text.strip()
+    try:
+        date.fromisoformat(date_str)
+    except ValueError:
+        await update.message.reply_text("Please use format `YYYY-MM-DD`, e.g. `2026-08-23`", parse_mode="Markdown")
+        return RACE_ADD_DATE
+    ctx.user_data["new_race_date"] = date_str
+    await update.message.reply_text("🎯 What's your target time? (e.g. `55:00` for 10K, or `-` to skip)")
+    return RACE_ADD_TARGET
+
+async def race_add_target(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    target = update.message.text.strip()
+    if target == "-":
+        target = ""
+    data = load_data()
+    race = {
+        "name": ctx.user_data.get("new_race_name", ""),
+        "date": ctx.user_data.get("new_race_date", ""),
+        "target": target
+    }
+    data.setdefault("custom_races", []).append(race)
+    save_data(data)
+    await update.message.reply_text(
+        f"✅ Added *{race['name']}* on {race['date']}" + (f" — target {target}" if target else ""),
+        parse_mode="Markdown", reply_markup=main_menu_keyboard()
+    )
+    ctx.user_data.pop("new_race_name", None)
+    ctx.user_data.pop("new_race_date", None)
+    return ConversationHandler.END
+
+async def cb_race_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, idx = query.data.split("|")
+    data = load_data()
+    races = data.get("custom_races", [])
+    if int(idx) < len(races):
+        removed = races.pop(int(idx))
+        save_data(data)
+        await query.edit_message_text(f"🗑 Removed *{removed['name']}*", parse_mode="Markdown")
+    else:
+        await query.edit_message_text("Race not found.")
+
+async def race_manager_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Cancelled.", reply_markup=main_menu_keyboard())
+    return ConversationHandler.END
+
 # ── Text router ──────────────────────────────────────────────────────
 async def text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -1132,6 +1303,8 @@ async def text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_gear(update, ctx)
     elif text == "🏁 Race Debrief":
         await race_debrief_start(update, ctx)
+    elif text == "🗓 Race Manager":
+        await show_race_manager(update, ctx)
     elif text == "🆘 Help":
         await show_help(update, ctx)
     else:
@@ -1185,6 +1358,18 @@ def main():
         per_message=False,
     )
 
+    # Race manager conversation
+    race_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_race_add, pattern=r"^race_add$")],
+        states={
+            RACE_ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, race_add_name)],
+            RACE_ADD_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, race_add_date)],
+            RACE_ADD_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, race_add_target)],
+        },
+        fallbacks=[CommandHandler("cancel", race_manager_cancel)],
+        per_message=False,
+    )
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("week", show_this_week))
     app.add_handler(CommandHandler("plan", show_full_plan))
@@ -1194,6 +1379,9 @@ def main():
     app.add_handler(edit_conv)
     app.add_handler(gear_conv)
     app.add_handler(debrief_conv)
+    app.add_handler(race_conv)
+    app.add_handler(CallbackQueryHandler(cb_autogear, pattern=r"^autogear\|"))
+    app.add_handler(CallbackQueryHandler(cb_race_remove, pattern=r"^race_remove\|"))
 
     app.add_handler(CallbackQueryHandler(cb_week, pattern=r"^week\|"))
     app.add_handler(CallbackQueryHandler(cb_toggle, pattern=r"^toggle\|"))
