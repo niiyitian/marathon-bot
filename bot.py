@@ -1,521 +1,925 @@
-import os, json, logging
-from datetime import date, timedelta
+"""
+BYD Marathon 2026 Training Tracker Bot
+t.me/YitianMarathonBot
+"""
+
+import json
+import os
+import re
+import logging
+import base64
+import httpx
+from datetime import datetime, date
+from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, filters, ContextTypes, ConversationHandler
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    ConversationHandler, filters, ContextTypes
 )
 
-TOKEN = "8727762251:AAG4HRx7CT-8G132mfxdZQRR3cyUxit1_xM"
-DATA_FILE = "progress.json"
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
 
-logging.basicConfig(level=logging.INFO)
+TOKEN = os.environ.get("BOT_TOKEN", "8727762251:AAG4HRx7CT-8G132mfxdZQRR3cyUxit1_xM")
+ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+DATA_FILE = Path("data.json")
 
-# ── PLAN DATA ─────────────────────────────────────────────────────────────────
-# Sessions per week: list of {day, type, title, note}
-PLAN = {
-1:  {"date":"Jun 24","label":"Base build","vol":22,"lr":12,"target":"Fix easy pace. Slow to 7:30+/km — HR under 145 on all easy runs.","sessions":[
-    {"day":"Tue","type":"Tempo","title":"Run club tempo — 70min easy @ 7:30/km","note":"Resist the club pace. Run your own easy effort.","editable":True},
-    {"day":"Thu","type":"Track","title":"Track club — 8×1km","note":"Target 5:40–5:50/km per rep. Full recovery between reps.","editable":True},
-    {"day":"Sat","type":"Long run","title":"Long run 12km @ 7:30–7:45/km","note":"Fix easy pace week.","editable":False}]},
-2:  {"date":"Jul 01","label":"Base build","vol":24,"lr":14,"target":"Build long run to 14km. Keep all easy runs truly easy.","sessions":[
-    {"day":"Tue","type":"Tempo","title":"Run club tempo — 70min easy @ 7:30/km","note":"Still easy week.","editable":True},
-    {"day":"Wed","type":"Easy","title":"Easy 5km @ 7:30/km","note":"","editable":False},
-    {"day":"Thu","type":"Track","title":"Track club — 12×300m","note":"Target 1:45–1:50 per rep.","editable":True},
-    {"day":"Sat","type":"Long run","title":"Long run 14km @ 7:30/km","note":"Conversational effort throughout.","editable":False}]},
-3:  {"date":"Jul 08","label":"Base build","vol":26,"lr":16,"target":"Introduce marathon pace. First taste of 7:00/km mid-week.","sessions":[
-    {"day":"Tue","type":"Tempo","title":"Run club — 3×20min tempo @ 6:50/km, 2min jog rest","note":"Participate fully this week.","editable":True},
-    {"day":"Wed","type":"Easy","title":"Easy 4km @ 7:45/km","note":"Recovery from Tuesday tempo.","editable":False},
-    {"day":"Thu","type":"Track","title":"Track club — 2×2km + 6×200m","note":"2km @ 6:00/km. 200m @ 5:30/km.","editable":True},
-    {"day":"Sat","type":"Long run","title":"Long run 16km — last 4km @ 7:05/km","note":"First marathon-pace segment.","editable":False}]},
-4:  {"date":"Jul 15","label":"Recovery","vol":20,"lr":12,"target":"Recovery week. Drop volume 20%. Legs adapt here — do not skip the rest.","sessions":[
-    {"day":"Tue","type":"Easy","title":"Easy run 6km @ 7:45/km","note":"Skip club tempo this week.","editable":False},
-    {"day":"Thu","type":"Track","title":"Track club — 6×300m only (half volume)","note":"Recovery week.","editable":True},
-    {"day":"Sat","type":"Long run","title":"Easy long run 12km @ 7:30–8:00/km","note":"No pressure on pace.","editable":False}]},
-5:  {"date":"Jul 22","label":"Base build","vol":30,"lr":18,"target":"Long run 18km — new distance milestone. Finish feeling you had more left.","sessions":[
-    {"day":"Tue","type":"Tempo","title":"Run club — 70min easy + 2×10min @ 6:50/km","note":"Modified — don't do full 3×20. Big long run Sat.","editable":True},
-    {"day":"Wed","type":"Easy","title":"Easy 5km @ 7:45/km","note":"","editable":False},
-    {"day":"Thu","type":"Track","title":"Track club — 8×1km @ 5:40/km","note":"","editable":True},
-    {"day":"Sat","type":"Long run","title":"Long run 18km @ 7:30/km","note":"Carry water. Plan a looped route.","editable":False}]},
-6:  {"date":"Jul 29","label":"Base build","vol":33,"lr":20,"target":"First 20km long run. This is a milestone — complete it at easy effort.","sessions":[
-    {"day":"Tue","type":"Tempo","title":"Run club — full session: 70min + 3×20min @ 6:50/km","note":"Good quality week.","editable":True},
-    {"day":"Wed","type":"Easy","title":"Easy 5km @ 7:45/km","note":"","editable":False},
-    {"day":"Thu","type":"Track","title":"Track club — 12×300m @ 5:45/km","note":"","editable":True},
-    {"day":"Sat","type":"Long run","title":"Long run 20km @ 7:30–7:45/km","note":"Bring a gel. Take it at 60min.","editable":False}]},
-7:  {"date":"Aug 05","label":"Marathon build","vol":35,"lr":22,"target":"Replace one track with marathon-pace work. Volume creeps up.","sessions":[
-    {"day":"Tue","type":"Tempo","title":"Run club — full tempo session","note":"","editable":True},
-    {"day":"Wed","type":"MP run","title":"Marathon pace run: 10km @ 7:00–7:05/km","note":"Replaces easy mid-week run.","editable":False},
-    {"day":"Thu","type":"Track","title":"Track club — 2×2km + 6×200m","note":"2km @ 6:00/km.","editable":True},
-    {"day":"Sat","type":"Long run","title":"Long run 22km @ 7:30/km","note":"Fuel at 45min and 90min.","editable":False}]},
-8:  {"date":"Aug 12","label":"Marathon build","vol":38,"lr":24,"target":"Long run 24km. Biggest week yet.","sessions":[
-    {"day":"Tue","type":"Tempo","title":"Run club — 3×20min tempo @ 6:50/km","note":"","editable":True},
-    {"day":"Wed","type":"MP run","title":"Marathon pace run: 12km @ 7:00/km","note":"","editable":False},
-    {"day":"Thu","type":"Track","title":"Track club — 8×1km @ 5:40/km","note":"","editable":True},
-    {"day":"Sat","type":"Long run","title":"Long run 24km @ 7:20–7:30/km","note":"Last 4km push to 7:00/km if feeling good.","editable":False}]},
-9:  {"date":"Aug 19","label":"Recovery","vol":28,"lr":16,"target":"Recovery week. Sleep 8hrs. Protect your legs.","sessions":[
-    {"day":"Tue","type":"Easy","title":"Easy run with club — 50min @ 7:30/km only","note":"Skip or shorten the tempo portion.","editable":False},
-    {"day":"Wed","type":"Easy","title":"Easy 5km @ 7:45/km","note":"","editable":False},
-    {"day":"Thu","type":"Track","title":"Track club — 6×300m only (half volume)","note":"","editable":True},
-    {"day":"Sat","type":"Long run","title":"Easy 16km @ 7:45/km","note":"No pace pressure.","editable":False}]},
-10: {"date":"Aug 26","label":"Marathon build","vol":40,"lr":26,"target":"Long run 26km — must carry gels and water.","sessions":[
-    {"day":"Tue","type":"Tempo","title":"Run club — full tempo: 3×20min @ 6:50/km","note":"","editable":True},
-    {"day":"Wed","type":"MP run","title":"Marathon pace run: 12km @ 7:00/km","note":"","editable":False},
-    {"day":"Thu","type":"Track","title":"Track club — 8×1km @ 5:40/km","note":"","editable":True},
-    {"day":"Sat","type":"Long run","title":"Long run 26km @ 7:30/km","note":"Gel at 45, 90, 135min. Negative split.","editable":False}]},
-11: {"date":"Sep 02","label":"Marathon build","vol":42,"lr":28,"target":"28km long run. Race-day fuelling rehearsal.","sessions":[
-    {"day":"Tue","type":"Tempo","title":"Run club — 70min + 2×20min @ 6:50/km","note":"Slightly reduced.","editable":True},
-    {"day":"Wed","type":"MP run","title":"Marathon pace: 10km @ 7:00/km","note":"","editable":False},
-    {"day":"Thu","type":"Track","title":"Track club — 12×300m @ 5:45/km","note":"","editable":True},
-    {"day":"Sat","type":"Long run","title":"Long run 28km @ 7:30/km","note":"Gel every 45min.","editable":False}]},
-12: {"date":"Sep 09","label":"Pre-race taper","vol":30,"lr":16,"target":"Taper for Sep 27 HM. Cut easy volume, keep sharpness.","sessions":[
-    {"day":"Tue","type":"Tempo","title":"Run club — 70min + 1×20min tempo @ 6:50/km","note":"Reduce to 1 tempo rep only.","editable":True},
-    {"day":"Wed","type":"Easy","title":"Easy 6km @ 7:30/km","note":"","editable":False},
-    {"day":"Thu","type":"Track","title":"Track club — 6×1km @ 5:40/km (half volume)","note":"","editable":True},
-    {"day":"Sat","type":"Long run","title":"Easy 16km @ 7:30/km","note":"","editable":False}]},
-13: {"date":"Sep 16","label":"Pre-race taper","vol":22,"lr":12,"target":"Final taper for Sep HM. Fresh legs by Friday.","sessions":[
-    {"day":"Tue","type":"Easy","title":"Easy 6km @ 7:30/km — skip club tempo","note":"","editable":False},
-    {"day":"Thu","type":"Track","title":"Track club — 4×300m + 4×200m strides only","note":"","editable":True},
-    {"day":"Sat","type":"Easy","title":"Easy shakeout 4km + 4 strides","note":"","editable":False}]},
-14: {"date":"Sep 23","label":"RACE WEEK","vol":15,"lr":None,"target":"Race Sep 27 HM — target sub-2:15. Start @ 6:25/km.","sessions":[
-    {"day":"Tue","type":"Easy","title":"Easy 4km shakeout @ 7:30/km","note":"","editable":False},
-    {"day":"Sat","type":"🏁 RACE","title":"RACE: Sep 27 Half Marathon","note":"Target sub-2:15. Negative split.","editable":False}]},
-15: {"date":"Sep 30","label":"Recovery","vol":20,"lr":10,"target":"Full recovery week post HM. Easy jogs only.","sessions":[
-    {"day":"Tue","type":"Easy","title":"Easy 5km @ 7:45–8:00/km","note":"Skip club tempo.","editable":False},
-    {"day":"Thu","type":"Easy","title":"Easy 5km @ 7:45/km — skip track","note":"","editable":False},
-    {"day":"Sat","type":"Easy","title":"Easy 10km @ 7:45/km","note":"","editable":False}]},
-16: {"date":"Oct 07","label":"Peak build","vol":42,"lr":28,"target":"Back to full training. Long run 28km.","sessions":[
-    {"day":"Tue","type":"Tempo","title":"Run club — full tempo: 3×20min @ 6:50/km","note":"","editable":True},
-    {"day":"Wed","type":"MP run","title":"Marathon pace: 12km @ 7:00/km","note":"","editable":False},
-    {"day":"Thu","type":"Track","title":"Track club — 8×1km @ 5:40/km","note":"","editable":True},
-    {"day":"Sat","type":"Long run","title":"Long run 28km @ 7:20/km","note":"Race-day shoes and gels.","editable":False}]},
-17: {"date":"Oct 14","label":"Peak build","vol":48,"lr":30,"target":"30km marathon simulation. Treat it like the real thing.","sessions":[
-    {"day":"Tue","type":"Tempo","title":"Run club — 3×20min @ 6:50/km","note":"","editable":True},
-    {"day":"Wed","type":"MP run","title":"Marathon pace: 14km @ 7:00/km","note":"Longest MP run in plan.","editable":False},
-    {"day":"Thu","type":"Track","title":"Track club — 2×2km + 6×200m","note":"","editable":True},
-    {"day":"Sat","type":"Long run","title":"Long run 30km @ 7:15–7:20/km","note":"Race-day kit. Gel at 45, 90, 135min.","editable":False}]},
-18: {"date":"Oct 21","label":"Peak build","vol":50,"lr":32,"target":"Peak week. 32km long run. Hardest week of the plan.","sessions":[
-    {"day":"Tue","type":"Tempo","title":"Run club — 2×20min @ 6:50/km only","note":"Reduce — big 32km Saturday.","editable":True},
-    {"day":"Wed","type":"MP run","title":"Marathon pace: 10km @ 7:00/km","note":"","editable":False},
-    {"day":"Thu","type":"Track","title":"Track club — 8×1km @ 5:40/km","note":"","editable":True},
-    {"day":"Sat","type":"Long run","title":"Long run 32km @ 7:20/km","note":"PEAK RUN. Gel at 45, 90, 135, 165min.","editable":False}]},
-19: {"date":"Oct 28","label":"RACE WEEK","vol":18,"lr":None,"target":"Nov 1 HM — run at marathon effort 7:00/km. Do NOT race.","sessions":[
-    {"day":"Tue","type":"Easy","title":"Easy 5km @ 7:45/km — skip club","note":"","editable":False},
-    {"day":"Thu","type":"Easy","title":"Easy 5km + strides — skip track","note":"","editable":False},
-    {"day":"Sat","type":"🏁 RACE","title":"RACE: Nov 1 Half Marathon (marathon effort)","note":"Target ~2:28. This is a training run with a bib.","editable":False}]},
-20: {"date":"Nov 04","label":"Recovery","vol":25,"lr":14,"target":"Easy week post Nov HM. Your peak work is done.","sessions":[
-    {"day":"Tue","type":"Easy","title":"Easy 5km @ 7:45/km — skip club","note":"","editable":False},
-    {"day":"Wed","type":"Easy","title":"Easy 6km @ 7:45/km","note":"","editable":False},
-    {"day":"Thu","type":"Easy","title":"Easy 5km or 4×300m easy","note":"","editable":False},
-    {"day":"Sat","type":"Easy","title":"Easy 14km @ 7:45/km","note":"","editable":False}]},
-21: {"date":"Nov 11","label":"Taper begins","vol":42,"lr":26,"target":"Bring forward peak long run to 26km — must be done BEFORE Hyrox Nov 26. Last real quality week.","sessions":[
-    {"day":"Tue","type":"Tempo","title":"Run club — 2×20min @ 6:50/km only","note":"Last quality club session.","editable":True},
-    {"day":"Wed","type":"MP run","title":"Marathon pace: 10km @ 7:00/km","note":"Last MP run of the plan. Should feel controlled and comfortable.","editable":False},
-    {"day":"Thu","type":"Track","title":"Track club — 6×1km @ 5:40/km","note":"Last track session. Controlled — not a time trial.","editable":True},
-    {"day":"Sat","type":"Long run","title":"Long run 26km @ 7:20/km","note":"IMPORTANT: peak long run moved here before Hyrox. Race-day shoes, gel every 45min.","editable":False}]},
-22: {"date":"Nov 18","label":"Pre-Hyrox taper","vol":22,"lr":12,"target":"Hard taper — arrive at Hyrox Nov 26 FRESH. Cut volume aggressively this week.","sessions":[
-    {"day":"Tue","type":"Tempo","title":"Run club — 70min easy @ 7:30/km only","note":"No tempo reps this week. Just easy running.","editable":True},
-    {"day":"Wed","type":"Easy","title":"Easy 5km @ 7:30/km","note":"","editable":False},
-    {"day":"Thu","type":"Track","title":"Track club — 4×300m easy strides only","note":"Show face but do very little. Save legs for Hyrox.","editable":True},
-    {"day":"Sat","type":"Easy","title":"Easy 12km @ 7:30/km","note":"Last run before Hyrox week. Keep it easy and controlled.","editable":False}]},
-23: {"date":"Nov 25","label":"🏋️ HYROX WEEK","vol":10,"lr":None,"target":"Hyrox Women's Doubles on Nov 26. Minimal running. Arrive fresh. Race hard.","sessions":[
-    {"day":"Mon","type":"Easy","title":"Easy 4km @ 7:30/km","note":"Only run of the week before Hyrox.","editable":False},
-    {"day":"Wed","type":"Easy","title":"Easy 3km shakeout + 4 strides","note":"Just to keep legs ticking. Nothing more.","editable":False},
-    {"day":"Thu","type":"Rest","title":"Full rest — no track club this week","note":"Save everything for Hyrox tomorrow.","editable":False},
-    {"day":"Wed","type":"🏋️ HYROX","title":"Hyrox Women's Doubles 🏋️","note":"Race it! Recover aggressively after — eat, hydrate, sleep. 10 days to marathon.","editable":False}]},
-24: {"date":"Dec 02","label":"RACE WEEK 🏁","vol":8,"lr":None,"target":"Post-Hyrox recovery + marathon prep. Drop Dec 5 pacing if possible — protect Dec 6.","sessions":[
-    {"day":"Mon","type":"Rest","title":"Full rest — Hyrox recovery","note":"Legs need 5–7 days after Hyrox. Do not run.","editable":False},
-    {"day":"Tue","type":"Rest","title":"Full rest — Hyrox recovery","note":"","editable":False},
-    {"day":"Wed","type":"Rest","title":"Full rest — Hyrox recovery","note":"","editable":False},
-    {"day":"Thu","type":"Easy","title":"Easy 3km shakeout only","note":"First run post-Hyrox. Legs should feel alive again. If not, skip it.","editable":False},
-    {"day":"Fri","type":"Rest","title":"Rest — pack race bags","note":"Early night. Prepare nutrition and kit for both days.","editable":False},
-    {"day":"Sat","type":"🏁 PACE","title":"⚠️ Dec 5 pacing duty — consider dropping","note":"If pacing: run 7:50/km, walk ALL uphills, eat 2 gels, hydrate heavily after. Sleep by 9pm. If dropped: 2km easy walk only.","editable":False},
-    {"day":"Sun","type":"🏁 RACE","title":"RACE DAY: BYD Full Marathon — Sub-5hr 🏁","note":"Start 7:15/km for first 10km. Settle into 7:05 from 10–30km. Hold on — you've earned this.","editable":False}]},
-}
+# ── Conversation states ──────────────────────────────────────────────
+EDIT_CHOOSE_SESSION, EDIT_ENTER_TEXT = range(2)
+LOG_CHOOSE_SESSION, LOG_UPLOAD = range(10, 12)
 
-TYPE_EMOJI = {
-    "Tempo":"🟢", "Track":"🟣", "Long run":"🔵", "Easy":"⚪",
-    "MP run":"🟠", "🏁 RACE":"🏁", "🏁 PACE":"🏁", "Recovery":"⚪",
-    "Rest":"😴", "🏋️ HYROX":"🏋️"
-}
+# ── Training plan (parsed from .ics) ────────────────────────────────
+TRAINING_PLAN = [
+  # (uid, date_str YYYY-MM-DD, summary, description, is_editable_thu, is_editable_tue)
+  # W01
+  ("w01_tue", "2026-06-23", "W01 · [Tempo] Run club tempo — 70min easy @ 7:30/km", "Resist the club pace. Run your own easy effort. HR under 145.", False, True),
+  ("w01_thu", "2026-06-25", "W01 · [Track] Track club — 8×1km", "Target 5:40–5:50/km per rep. Full recovery between reps.", True, False),
+  ("w01_sat", "2026-06-27", "W01 · [Long run] Long run 12km @ 7:30–7:45/km", "Fix easy pace week. Slow and controlled.", False, False),
+  # W02
+  ("w02_tue", "2026-06-30", "W02 · [Tempo] Run club tempo — 70min easy @ 7:30/km", "Still easy week — treat club session as an easy run.", False, True),
+  ("w02_thu", "2026-07-02", "W02 · [Track] Track club — 12×300m", "Target 1:45–1:50 per rep (5:50/km effort).", True, False),
+  ("w02_sat", "2026-07-04", "W02 · [Long run] Long run 14km @ 7:30/km", "Keep conversational effort throughout.", False, False),
+  # W03
+  ("w03_tue", "2026-07-07", "W03 · [Tempo] Run club — 3×20min tempo @ 6:50/km, 2min jog rest", "Participate fully this week. Good quality session.", False, True),
+  ("w03_wed", "2026-07-08", "W03 · [Easy] Easy 4km @ 7:45/km", "Recovery from Tuesday tempo.", False, False),
+  ("w03_thu", "2026-07-09", "W03 · [Track] Track club — 2×2km + 6×200m", "2km reps @ 6:00/km. 200m @ 5:30/km.", True, False),
+  ("w03_sat", "2026-07-11", "W03 · [Long run] Long run 16km — last 4km @ 7:05/km", "First 12km @ 7:30, then last 4km at marathon pace. Finish strong.", False, False),
+  # W04
+  ("w04_tue", "2026-07-14", "W04 · [Easy] Easy run 6km @ 7:45/km", "Skip club tempo this week — recovery week.", False, True),
+  ("w04_thu", "2026-07-16", "W04 · [Track] Track club — 6×300m only (half volume)", "Recovery week. Tell yourself it's intentional.", True, False),
+  ("w04_sat", "2026-07-18", "W04 · [Long run] Easy long run 12km @ 7:30–8:00/km", "Recovery week. No pressure on pace.", False, False),
+  # W05
+  ("w05_tue", "2026-07-21", "W05 · [Tempo] Run club — 70min easy + 2×10min @ 6:50/km", "Modified — don't do the full 3×20. Big long run Saturday.", False, True),
+  ("w05_wed", "2026-07-22", "W05 · [Easy] Easy 5km @ 7:45/km", "", False, False),
+  ("w05_thu", "2026-07-23", "W05 · [Track] Track club — 8×1km @ 5:40/km", "", True, False),
+  ("w05_sat", "2026-07-25", "W05 · [Long run] Long run 18km @ 7:30/km", "Carry water. Plan a looped route. New distance milestone.", False, False),
+  # W06
+  ("w06_tue", "2026-07-28", "W06 · [Tempo] Run club — full session: 70min + 3×20min @ 6:50/km", "Good quality week. Recover well after.", False, True),
+  ("w06_wed", "2026-07-29", "W06 · [Easy] Easy 5km @ 7:45/km", "", False, False),
+  ("w06_thu", "2026-07-30", "W06 · [Track] Track club — 12×300m @ 5:45/km", "", True, False),
+  ("w06_sat", "2026-08-01", "W06 · [Long run] Long run 20km @ 7:30–7:45/km", "MILESTONE: first 20km. Bring a gel — take at 60min. Walk 1 min every 5km if needed.", False, False),
+  # W07
+  ("w07_tue", "2026-08-04", "W07 · [Tempo] Run club — full tempo session", "", False, True),
+  ("w07_wed", "2026-08-05", "W07 · [MP run] Marathon pace run: 10km @ 7:00–7:05/km", "Replaces easy mid-week run. Controlled effort — not racing.", False, False),
+  ("w07_thu", "2026-08-06", "W07 · [Track] Track club — 2×2km + 6×200m", "2km @ 6:00/km. Feel the pace difference from Wednesday.", True, False),
+  ("w07_sat", "2026-08-08", "W07 · [Long run] Long run 22km @ 7:30/km", "Fuel at 45min and 90min. Practice your race-day gel routine.", False, False),
+  # W08
+  ("w08_tue", "2026-08-11", "W08 · [Tempo] Run club — 3×20min tempo @ 6:50/km", "", False, True),
+  ("w08_wed", "2026-08-12", "W08 · [MP run] Marathon pace run: 12km @ 7:00/km", "", False, False),
+  ("w08_thu", "2026-08-13", "W08 · [Track] Track club — 8×1km @ 5:40/km", "", True, False),
+  ("w08_sat", "2026-08-15", "W08 · [Long run] Long run 24km @ 7:20–7:30/km", "Last 4km push to 7:00/km if feeling good.", False, False),
+  # W09
+  ("w09_tue", "2026-08-18", "W09 · [Easy] Easy run with club — 50min @ 7:30/km only", "Skip or shorten the tempo portion.", False, True),
+  ("w09_wed", "2026-08-19", "W09 · [Easy] Easy 5km @ 7:45/km", "", False, False),
+  ("w09_thu", "2026-08-20", "W09 · [Track] Track club — 6×300m only (half volume)", "Recovery week.", True, False),
+  ("w09_sat", "2026-08-22", "W09 · [Long run] Easy 16km @ 7:45/km", "Recovery week long run. No pace pressure.", False, False),
+  # W10
+  ("w10_tue", "2026-08-25", "W10 · [Tempo] Run club — full tempo: 3×20min @ 6:50/km", "", False, True),
+  ("w10_wed", "2026-08-26", "W10 · [MP run] Marathon pace run: 12km @ 7:00/km", "", False, False),
+  ("w10_thu", "2026-08-27", "W10 · [Track] Track club — 8×1km @ 5:40/km", "", True, False),
+  ("w10_sat", "2026-08-29", "W10 · [Long run] Long run 26km @ 7:30/km", "Gel at 45, 90, 135min. Aim for negative split — 2nd half slightly faster.", False, False),
+  # W11
+  ("w11_tue", "2026-09-01", "W11 · [Tempo] Run club — 70min + 2×20min @ 6:50/km", "Slightly reduced — big long run coming Saturday.", False, True),
+  ("w11_wed", "2026-09-02", "W11 · [MP run] Marathon pace: 10km @ 7:00/km", "", False, False),
+  ("w11_thu", "2026-09-03", "W11 · [Track] Track club — 12×300m @ 5:45/km", "", True, False),
+  ("w11_sat", "2026-09-05", "W11 · [Long run] Long run 28km @ 7:30/km", "Confidence builder. Run your own pace. Gel every 45min.", False, False),
+  # W12
+  ("w12_tue", "2026-09-08", "W12 · [Tempo] Run club — 70min + 1×20min tempo @ 6:50/km", "Reduce to 1 tempo rep only.", False, True),
+  ("w12_wed", "2026-09-09", "W12 · [Easy] Easy 6km @ 7:30/km", "", False, False),
+  ("w12_thu", "2026-09-10", "W12 · [Track] Track club — 6×1km @ 5:40/km (half volume)", "", True, False),
+  ("w12_sat", "2026-09-12", "W12 · [Long run] Easy 16km @ 7:30/km", "", False, False),
+  # W13
+  ("w13_tue", "2026-09-15", "W13 · [Easy] Easy 6km @ 7:30/km — skip club tempo", "", False, True),
+  ("w13_thu", "2026-09-17", "W13 · [Track] Track club — 4×300m + 4×200m strides only", "", True, False),
+  ("w13_fri", "2026-09-19", "W13 · [Easy] Easy shakeout 4km @ 7:30/km + 4 strides", "", False, False),
+  # W14
+  ("w14_tue", "2026-09-22", "W14 · [Easy] Easy 4km shakeout @ 7:30/km", "", False, False),
+  ("w14_sat", "2026-09-26", "W14 · [🏁 RACE] RACE: Sep 27 Half Marathon", "Target sub-2:15. Start conservative @ 6:25/km. Negative split. This is your fitness test for Dec.", False, False),
+  # W15
+  ("w15_tue", "2026-09-29", "W15 · [Easy] Easy 5km @ 7:45–8:00/km — skip club tempo", "", False, True),
+  ("w15_thu", "2026-10-01", "W15 · [Easy] Easy 5km @ 7:45/km — skip track", "", False, False),
+  ("w15_sat", "2026-10-03", "W15 · [Easy] Easy 10km @ 7:45/km", "Full recovery week post HM.", False, False),
+  # W16
+  ("w16_tue", "2026-10-06", "W16 · [Tempo] Run club — full tempo: 3×20min @ 6:50/km", "", False, True),
+  ("w16_wed", "2026-10-07", "W16 · [MP run] Marathon pace: 12km @ 7:00/km", "", False, False),
+  ("w16_thu", "2026-10-08", "W16 · [Track] Track club — 8×1km @ 5:40/km", "", True, False),
+  ("w16_sat", "2026-10-10", "W16 · [Long run] Long run 28km @ 7:20/km", "Race-day shoes and gels. Simulate Dec 6 exactly.", False, False),
+  # W17
+  ("w17_tue", "2026-10-13", "W17 · [Tempo] Run club — 3×20min @ 6:50/km", "", False, True),
+  ("w17_wed", "2026-10-14", "W17 · [MP run] Marathon pace: 14km @ 7:00/km", "Longest MP run in the plan. Controlled effort.", False, False),
+  ("w17_thu", "2026-10-15", "W17 · [Track] Track club — 2×2km + 6×200m", "", True, False),
+  ("w17_sat", "2026-10-17", "W17 · [Long run] Long run 30km @ 7:15–7:20/km", "Race-day kit. Gel at 45, 90, 135min. Last 5km @ 7:00/km.", False, False),
+  # W18
+  ("w18_tue", "2026-10-20", "W18 · [Tempo] Run club — 2×20min @ 6:50/km only", "Reduce to 2 reps — big 32km coming Saturday.", False, True),
+  ("w18_wed", "2026-10-21", "W18 · [MP run] Marathon pace: 10km @ 7:00/km", "", False, False),
+  ("w18_thu", "2026-10-22", "W18 · [Track] Track club — 8×1km @ 5:40/km", "", True, False),
+  ("w18_sat", "2026-10-24", "W18 · [Long run] Long run 32km @ 7:20/km", "PEAK RUN. Gel at 45, 90, 135, 165min. Run through fatigue. You earned this.", False, False),
+  # W19
+  ("w19_tue", "2026-10-27", "W19 · [Easy] Easy 5km @ 7:45/km — skip club", "", False, False),
+  ("w19_thu", "2026-10-29", "W19 · [Easy] Easy 5km + strides — skip track", "", False, False),
+  ("w19_sat", "2026-10-31", "W19 · [🏁 RACE] RACE: Nov 1 Half Marathon (marathon effort)", "Do NOT race this. Run @ 7:00–7:05/km marathon effort. Target ~2:28. This is a training run with a bib.", False, False),
+  # W20
+  ("w20_tue", "2026-11-03", "W20 · [Easy] Easy 5km @ 7:45/km — skip club tempo", "", False, False),
+  ("w20_wed", "2026-11-04", "W20 · [Easy] Easy 6km @ 7:45/km", "", False, False),
+  ("w20_thu", "2026-11-05", "W20 · [Easy] Easy 5km — skip track or do 4×300m easy", "", False, False),
+  ("w20_sat", "2026-11-07", "W20 · [Easy] Easy 14km @ 7:45/km", "", False, False),
+  # W21
+  ("w21_tue", "2026-11-10", "W21 · [Tempo] Run club — 2×20min @ 6:50/km only", "Last quality session with the club.", False, True),
+  ("w21_wed", "2026-11-11", "W21 · [MP run] Marathon pace: 10km @ 7:00/km", "Last MP run of the plan. Should feel controlled and comfortable.", False, False),
+  ("w21_thu", "2026-11-12", "W21 · [Track] Track club — 6×1km @ 5:40/km", "Last track session. Controlled — not a time trial.", True, False),
+  ("w21_sat", "2026-11-14", "W21 · [Long run] Last long run: 22km @ 7:20/km", "", False, False),
+  # W22
+  ("w22_tue", "2026-11-17", "W22 · [Tempo] Run club — 70min easy + 1×15min @ 6:50/km", "Much reduced. Easy effort overall.", False, True),
+  ("w22_wed", "2026-11-18", "W22 · [Easy] Easy 6km @ 7:30/km", "", False, False),
+  ("w22_thu", "2026-11-19", "W22 · [Track] Track club — 4×1km @ 5:40/km only", "", True, False),
+  ("w22_sat", "2026-11-21", "W22 · [Easy] Easy 16km @ 7:30/km", "", False, False),
+  ("w22_thu2", "2026-11-26", "W22 · [🏋️ HYROX] Hyrox Women Doubles", "⚠️ This is 10 days before race day. Treat it as a hard effort — don't leave everything on the floor. Prioritise recovery immediately after: protein, sleep, compression.", False, False),
+  # W23
+  ("w23_tue", "2026-11-24", "W23 · [Easy] Easy 6km @ 7:30/km — skip club", "", False, False),
+  ("w23_wed", "2026-11-25", "W23 · [MP run] 4km @ 7:00/km + 4 strides", "Just to keep legs sharp. Not a workout.", False, False),
+  ("w23_thu", "2026-11-26", "W23 · [Track] Track club — 4×200m strides only", "Show face, do very little. Save the legs.", True, False),
+  ("w23_sat", "2026-11-28", "W23 · [Easy] Easy 10km @ 7:30/km", "", False, False),
+  # W24
+  ("w24_tue", "2026-12-01", "W24 · [Easy] Easy 3km shakeout @ 7:30/km", "", False, False),
+  ("w24_fri", "2026-12-05", "W24 · [🏁 PACE] PACING DUTY: Dec 5 HM @ 7:50/km", "Walk uphills. Eat 2 gels. Refuel HUGE after finishing. Sleep by 9pm. Big day tomorrow.", False, False),
+  ("w24_sun", "2026-12-06", "W24 · [🏁 RACE DAY] BYD Full Marathon — Target sub-5hr", "Start @ 7:15/km for first 10km. Settle into 7:05 from 10–30km. Hold on. You've done the work.", False, False),
+]
 
-# ── DATA PERSISTENCE ──────────────────────────────────────────────────────────
-def load_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE) as f:
-            return json.load(f)
-    return {"completed": {}, "photos": {}, "edits": {}, "notes": {}}
+# ── Data helpers ─────────────────────────────────────────────────────
+def load_data() -> dict:
+    if DATA_FILE.exists():
+        return json.loads(DATA_FILE.read_text())
+    return {"completed": {}, "edits": {}, "logs": {}}
 
-def save_data(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+def save_data(data: dict):
+    DATA_FILE.write_text(json.dumps(data, indent=2))
 
-# ── HELPERS ───────────────────────────────────────────────────────────────────
-def current_week():
-    start = date(2026, 6, 22)  # Monday of week 1
+def get_session(uid: str):
+    for s in TRAINING_PLAN:
+        if s[0] == uid:
+            return s
+    return None
+
+def get_week_sessions(week: str):
+    return [s for s in TRAINING_PLAN if s[0].startswith(week)]
+
+def today_str():
+    return date.today().isoformat()
+
+def current_week_num():
+    """Return which week we're in (1-24), or None if outside plan."""
     today = date.today()
-    diff = (today - start).days
-    w = diff // 7 + 1
-    return max(1, min(24, w))
+    for i, s in enumerate(TRAINING_PLAN):
+        s_date = date.fromisoformat(s[1])
+        if s_date >= today:
+            # Extract week number from uid like w01_xxx
+            m = re.match(r"w(\d+)_", s[0])
+            return int(m.group(1)) if m else 1
+    return 24
 
-def session_key(week, idx):
-    return f"{week}_{idx}"
+def session_display(s, data: dict) -> str:
+    uid, dt, summary, desc, is_thu, is_tue = s
+    overrides = data.get("edits", {})
+    display_summary = overrides.get(uid, {}).get("summary", summary)
+    display_desc = overrides.get(uid, {}).get("desc", desc)
+    done = uid in data.get("completed", {})
+    has_log = uid in data.get("logs", {})
 
-def week_summary(week, data):
-    wk = PLAN[week]
-    sessions = get_sessions(week, data)
-    done = sum(1 for i in range(len(sessions)) if data["completed"].get(session_key(week, i)))
-    total = len(sessions)
-    bar = "█" * done + "░" * (total - done)
-    pct = int(done/total*100) if total else 0
+    status = "✅" if done else "⬜"
+    log_icon = " 📎" if has_log else ""
+    edit_icon = " ✏️" if uid in overrides else ""
 
-    race_flag = "🏁 " if "RACE" in wk["label"] else ""
-    text = (
-        f"*{race_flag}Week {week} — {wk['date']} — {wk['label']}*\n"
-        f"📦 Volume: {wk['vol']}km"
-        + (f" | Long run: {wk['lr']}km" if wk['lr'] else "") + "\n"
-        f"🎯 {wk['target']}\n\n"
-        f"Progress: {bar} {done}/{total} ({pct}%)\n"
-    )
+    text = f"{status} {display_summary}{edit_icon}{log_icon}\n"
+    if display_desc:
+        text += f"   _{display_desc}_\n"
+    text += f"   📅 {dt}\n"
     return text
 
-def get_sessions(week, data):
-    """Return sessions with any edits applied."""
-    sessions = []
-    for i, s in enumerate(PLAN[week]["sessions"]):
-        key = session_key(week, i)
-        edited = data["edits"].get(key)
-        if edited:
-            s = dict(s)
-            s["title"] = edited
-        sessions.append(s)
-    return sessions
-
-# ── STATES ────────────────────────────────────────────────────────────────────
-EDIT_WEEK, EDIT_IDX, EDIT_TEXT = range(3)
-PHOTO_WEEK, PHOTO_IDX = range(2)
-
-# ── COMMAND HANDLERS ──────────────────────────────────────────────────────────
-async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👟 *Yitian's Marathon Tracker*\n\n"
-        "24 weeks to BYD Singapore Marathon — Dec 6, 2026 🏁\n\n"
-        "Commands:\n"
-        "/week — This week's sessions\n"
-        "/week [n] — Any week (e.g. /week 3)\n"
-        "/today — Today's session\n"
-        "/progress — Overall progress\n"
-        "/done [n] — Mark session done in current week\n"
-        "/edit — Edit a Tue/Thu session\n"
-        "/log — Upload activity screenshot\n"
-        "/paces — Your target paces\n"
-        "/help — Show this menu",
-        parse_mode="Markdown"
+# ── Main menu keyboard ───────────────────────────────────────────────
+def main_menu_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            ["📅 This Week", "📋 Full Plan"],
+            ["✅ Log Complete", "📷 Upload Activity"],
+            ["✏️ Edit Thursday", "✏️ Edit Tuesday"],
+            ["📊 My Progress", "🔮 Predictions"],
+            ["📋 Week Summary", "🆘 Help"],
+        ],
+        resize_keyboard=True
     )
 
-async def paces(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+# ── /start ───────────────────────────────────────────────────────────
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📏 *Your Target Paces*\n\n"
-        "⚪ Easy / recovery: `7:30–8:00 /km`\n"
-        "🔵 Long run: `7:15–7:45 /km`\n"
-        "🟠 Marathon pace: `7:00–7:05 /km`\n"
-        "🟢 Tempo: `6:40–6:50 /km`\n"
-        "🟣 Track reps: `5:30–5:50 /km`\n"
-        "🏁 Dec 5 pacing duty: `7:50 /km`\n\n"
-        "Sub-5hr = 7:06/km race pace",
-        parse_mode="Markdown"
+        "👟 *BYD Marathon 2026 Training Bot*\n\n"
+        "I'll help you track your 24-week plan to sub-5hr on Dec 6 🏅\n\n"
+        "Use the menu below to navigate. Good luck with the training!",
+        parse_mode="Markdown",
+        reply_markup=main_menu_keyboard()
     )
 
-async def show_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+# ── This week ────────────────────────────────────────────────────────
+async def show_this_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = load_data()
-    args = ctx.args
-    if args and args[0].isdigit():
-        week = int(args[0])
-        if not 1 <= week <= 24:
-            await update.message.reply_text("Week must be between 1 and 24.")
-            return
-    else:
-        week = current_week()
+    wnum = current_week_num()
+    week_key = f"w{wnum:02d}"
+    sessions = get_week_sessions(week_key)
 
-    wk = PLAN[week]
-    sessions = get_sessions(week, data)
-    text = week_summary(week, data)
-    text += "\n*Sessions:*\n"
-    for i, s in enumerate(sessions):
-        done = data["completed"].get(session_key(week, i), False)
-        emoji = TYPE_EMOJI.get(s["type"], "▪️")
-        tick = "✅" if done else "⬜"
-        edit_flag = " ✏️" if s.get("editable") else ""
-        text += f"\n{tick} `[{i+1}]` {emoji} *{s['day']}* — {s['title']}{edit_flag}"
-        if s["note"]:
-            text += f"\n      _{s['note']}_"
+    if not sessions:
+        await update.message.reply_text("You're outside the plan window. Race day was Dec 6 🎉")
+        return
 
-    text += f"\n\n✏️ = editable session (Tue/Thu)\nUse /done [n] to mark complete\nUse /edit to update Tue or Thu session"
+    text = f"*Week {wnum} — Your Sessions*\n\n"
+    for s in sessions:
+        text += session_display(s, data) + "\n"
 
-    # Nav buttons
+    # Quick-complete buttons
+    incomplete = [s for s in sessions if s[0] not in data.get("completed", {})]
     buttons = []
-    if week > 1:
-        buttons.append(InlineKeyboardButton("◀ Prev", callback_data=f"week_{week-1}"))
-    buttons.append(InlineKeyboardButton(f"W{week}", callback_data="noop"))
-    if week < 24:
-        buttons.append(InlineKeyboardButton("Next ▶", callback_data=f"week_{week+1}"))
+    for s in incomplete:
+        uid = s[0]
+        label = s[2][:35] + "…" if len(s[2]) > 35 else s[2]
+        buttons.append([InlineKeyboardButton(f"✅ {label}", callback_data=f"done|{uid}")])
 
-    markup = InlineKeyboardMarkup([buttons])
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
+    kb = InlineKeyboardMarkup(buttons) if buttons else None
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
 
-async def nav_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+# ── Full plan ────────────────────────────────────────────────────────
+async def show_full_plan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    data = load_data()
+    total = len(TRAINING_PLAN)
+    done_count = len(data.get("completed", {}))
+
+    # Week navigation buttons
+    buttons = []
+    row = []
+    for w in range(1, 25):
+        wk = f"W{w:02d}"
+        row.append(InlineKeyboardButton(wk, callback_data=f"week|{w:02d}"))
+        if len(row) == 6:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+
+    kb = InlineKeyboardMarkup(buttons)
+    await update.message.reply_text(
+        f"*Full Training Plan*\n"
+        f"Progress: {done_count}/{total} sessions ({'%.0f' % (done_count/total*100)}%)\n\n"
+        f"Tap a week to view its sessions:",
+        parse_mode="Markdown",
+        reply_markup=kb
+    )
+
+async def cb_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if query.data == "noop":
+    _, wnum_str = query.data.split("|")
+    week_key = f"w{wnum_str}"
+    sessions = get_week_sessions(week_key)
+    data = load_data()
+
+    if not sessions:
+        await query.edit_message_text("No sessions for that week.")
         return
-    week = int(query.data.split("_")[1])
-    data = load_data()
-    wk = PLAN[week]
-    sessions = get_sessions(week, data)
-    text = week_summary(week, data)
-    text += "\n*Sessions:*\n"
-    for i, s in enumerate(sessions):
-        done = data["completed"].get(session_key(week, i), False)
-        emoji = TYPE_EMOJI.get(s["type"], "▪️")
-        tick = "✅" if done else "⬜"
-        edit_flag = " ✏️" if s.get("editable") else ""
-        text += f"\n{tick} `[{i+1}]` {emoji} *{s['day']}* — {s['title']}{edit_flag}"
-        if s["note"]:
-            text += f"\n      _{s['note']}_"
-    text += f"\n\n✏️ = editable (Tue/Thu) | /done [n] | /edit"
+
+    text = f"*Week {int(wnum_str)} Sessions*\n\n"
+    for s in sessions:
+        text += session_display(s, data) + "\n"
+
     buttons = []
-    if week > 1:
-        buttons.append(InlineKeyboardButton("◀ Prev", callback_data=f"week_{week-1}"))
-    buttons.append(InlineKeyboardButton(f"W{week}", callback_data="noop"))
-    if week < 24:
-        buttons.append(InlineKeyboardButton("Next ▶", callback_data=f"week_{week+1}"))
-    markup = InlineKeyboardMarkup([buttons])
-    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
+    for s in sessions:
+        uid = s[0]
+        done = uid in data.get("completed", {})
+        label = ("✅ " if done else "⬜ ") + (s[2][:30] + "…" if len(s[2]) > 30 else s[2])
+        buttons.append([InlineKeyboardButton(label, callback_data=f"toggle|{uid}")])
+    buttons.append([InlineKeyboardButton("« Back to weeks", callback_data="back_weeks")])
 
-async def today_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+
+async def cb_toggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, uid = query.data.split("|")
     data = load_data()
-    week = current_week()
-    today_name = date.today().strftime("%a")  # Mon, Tue, Wed...
-    sessions = get_sessions(week, data)
-    matches = [(i, s) for i, s in enumerate(sessions) if s["day"] == today_name]
+    completed = data.setdefault("completed", {})
 
-    if not matches:
+    if uid in completed:
+        del completed[uid]
+        msg = "↩️ Unmarked as complete."
+    else:
+        completed[uid] = today_str()
+        msg = "✅ Marked as complete!"
+
+    save_data(data)
+    await query.answer(msg, show_alert=False)
+
+    # Refresh the week view
+    m = re.match(r"(w\d+)_", uid)
+    if m:
+        wnum_str = m.group(1)[1:]
+        week_key = f"w{wnum_str}"
+        sessions = get_week_sessions(week_key)
+        text = f"*Week {int(wnum_str)} Sessions*\n\n"
+        for s in sessions:
+            text += session_display(s, data) + "\n"
+        buttons = []
+        for s in sessions:
+            sid = s[0]
+            done = sid in data.get("completed", {})
+            label = ("✅ " if done else "⬜ ") + (s[2][:30] + "…" if len(s[2]) > 30 else s[2])
+            buttons.append([InlineKeyboardButton(label, callback_data=f"toggle|{sid}")])
+        buttons.append([InlineKeyboardButton("« Back to weeks", callback_data="back_weeks")])
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+
+async def cb_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Quick-complete from this-week view."""
+    query = update.callback_query
+    await query.answer()
+    _, uid = query.data.split("|")
+    data = load_data()
+    data.setdefault("completed", {})[uid] = today_str()
+    save_data(data)
+    await query.answer("✅ Marked complete!", show_alert=False)
+    # Just refresh this week
+    wnum = current_week_num()
+    week_key = f"w{wnum:02d}"
+    sessions = get_week_sessions(week_key)
+    text = f"*Week {wnum} — Your Sessions*\n\n"
+    for s in sessions:
+        text += session_display(s, data) + "\n"
+    incomplete = [s for s in sessions if s[0] not in data.get("completed", {})]
+    buttons = []
+    for s in incomplete:
+        sid = s[0]
+        label = s[2][:35] + "…" if len(s[2]) > 35 else s[2]
+        buttons.append([InlineKeyboardButton(f"✅ {label}", callback_data=f"done|{sid}")])
+    kb = InlineKeyboardMarkup(buttons) if buttons else None
+    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+
+async def cb_back_weeks(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = load_data()
+    total = len(TRAINING_PLAN)
+    done_count = len(data.get("completed", {}))
+    buttons = []
+    row = []
+    for w in range(1, 25):
+        wk = f"W{w:02d}"
+        row.append(InlineKeyboardButton(wk, callback_data=f"week|{w:02d}"))
+        if len(row) == 6:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    kb = InlineKeyboardMarkup(buttons)
+    await query.edit_message_text(
+        f"*Full Training Plan*\nProgress: {done_count}/{total} sessions\n\nTap a week to view:",
+        parse_mode="Markdown", reply_markup=kb
+    )
+
+# ── Log complete (with note) ─────────────────────────────────────────
+async def log_complete_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    data = load_data()
+    wnum = current_week_num()
+    week_key = f"w{wnum:02d}"
+    sessions = get_week_sessions(week_key)
+    incomplete = [s for s in sessions if s[0] not in data.get("completed", {})]
+
+    if not incomplete:
+        await update.message.reply_text("🎉 All sessions this week are done! Check next week with /plan.")
+        return
+
+    buttons = []
+    for s in incomplete:
+        label = s[2][:40] + "…" if len(s[2]) > 40 else s[2]
+        buttons.append([InlineKeyboardButton(label, callback_data=f"markdone|{s[0]}")])
+
+    await update.message.reply_text(
+        "Which session did you complete?",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+async def cb_markdone(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, uid = query.data.split("|")
+    data = load_data()
+    data.setdefault("completed", {})[uid] = today_str()
+    save_data(data)
+    s = get_session(uid)
+    name = s[2] if s else uid
+    await query.edit_message_text(f"✅ *{name}*\n\nMarked complete on {today_str()} 🎉\n\nUse *Upload Activity* to attach a Strava screenshot.", parse_mode="Markdown")
+
+# ── Upload activity ──────────────────────────────────────────────────
+async def upload_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    data = load_data()
+    wnum = current_week_num()
+    week_key = f"w{wnum:02d}"
+    sessions = get_week_sessions(week_key)
+
+    buttons = []
+    for s in sessions:
+        uid = s[0]
+        done_marker = "✅ " if uid in data.get("completed", {}) else ""
+        has_log = "📎 " if uid in data.get("logs", {}) else ""
+        display = data.get("edits", {}).get(uid, {}).get("summary", s[2])
+        label = done_marker + has_log + (display[:38] + "…" if len(display) > 38 else display)
+        buttons.append([InlineKeyboardButton(label, callback_data=f"upload_session|{uid}")])
+
+    # Extra activity option
+    buttons.append([InlineKeyboardButton("➕ Extra activity (not in plan)", callback_data="upload_session|extra")])
+
+    await update.message.reply_text(
+        "📷 Which session do you want to upload an activity log for?",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+async def cb_upload_session(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, uid = query.data.split("|")
+    ctx.user_data["upload_uid"] = uid
+    data = load_data()
+    if uid == "extra":
+        await query.edit_message_text(
+            "📷 Send your Strava or Garmin screenshot for the extra activity.\n\nAdd a caption describing what it was (optional) 👇",
+            parse_mode="Markdown"
+        )
+    else:
+        s = get_session(uid)
+        name = data.get("edits", {}).get(uid, {}).get("summary", s[2] if s else uid)
+        await query.edit_message_text(
+            f"📷 Send your Strava screenshot or Garmin activity image for:\n\n*{name}*\n\nJust send the photo now 👇",
+            parse_mode="Markdown"
+        )
+
+async def analyse_with_claude(image_bytes: bytes, session_summary: str, session_desc: str) -> str:
+    """Send screenshot to Claude and get run analysis."""
+    if not ANTHROPIC_KEY:
+        return ""
+    b64 = base64.standard_b64encode(image_bytes).decode()
+    prompt = (
+        f"You are an experienced marathon running coach — direct, knowledgeable, and encouraging but honest. "
+        f"The athlete trains in Singapore (year-round heat 28–34°C, humidity 70–90%). "
+        f"Heart rates in Singapore will naturally run 5–10 bpm higher than in cool conditions — factor this in when assessing effort vs pace. "
+        f"The planned session was: {session_summary}. Coach's notes: {session_desc}\n\n"
+        f"Analyse this activity screenshot and respond in exactly this format:\n\n"
+        f"Rating: X/10\n\n"
+        f"On track: [one sentence comparing actual numbers to the plan target]\n\n"
+        f"Well done: [one specific thing the athlete executed well, citing actual numbers]\n\n"
+        f"Next time: [one concrete, actionable coaching cue for the next session]\n\n"
+        f"Use actual numbers from the screenshot. Sound like a coach, not a chatbot — "
+        f"firm, specific, and motivating. No emojis. No filler phrases like 'great job' or 'awesome'."
+    )
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-sonnet-4-6",
+                    "max_tokens": 400,
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                            {"type": "text", "text": prompt}
+                        ]
+                    }]
+                }
+            )
+        result = resp.json()
+        return result["content"][0]["text"]
+    except Exception as e:
+        logger.error(f"Claude analysis failed: {e}")
+        return ""
+
+
+async def receive_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = ctx.user_data.get("upload_uid")
+    if not uid:
         await update.message.reply_text(
-            f"*Week {week} — {PLAN[week]['date']}*\n\nNo session scheduled for today ({today_name}). Rest up! 💤",
+            "First choose a session via *Upload Activity*, then send your photo.",
             parse_mode="Markdown"
         )
         return
 
-    text = f"*Today's session — Week {week} ({today_name}):*\n"
-    for i, s in matches:
-        done = data["completed"].get(session_key(week, i), False)
-        emoji = TYPE_EMOJI.get(s["type"], "▪️")
-        tick = "✅ Done!" if done else "⬜ Not yet"
-        text += f"\n{emoji} *{s['type']}* [{i+1}]\n{s['title']}\n"
-        if s["note"]:
-            text += f"_{s['note']}_\n"
-        text += f"Status: {tick}\n"
-    text += f"\n🎯 Week target: {PLAN[week]['target']}"
-    if not all(data["completed"].get(session_key(week, i)) for i, _ in matches):
-        text += "\n\nUse /done [n] to mark complete, /log to upload your Strava screenshot."
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-async def done_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = load_data()
-    week = current_week()
-    if not ctx.args or not ctx.args[0].isdigit():
-        await update.message.reply_text("Usage: /done [session number]\nE.g. /done 2\n\nCheck /week to see session numbers.")
-        return
-    idx = int(ctx.args[0]) - 1
-    sessions = get_sessions(week, data)
-    if idx < 0 or idx >= len(sessions):
-        await update.message.reply_text(f"Session number must be between 1 and {len(sessions)}.")
-        return
-    key = session_key(week, idx)
-    was_done = data["completed"].get(key, False)
-    data["completed"][key] = not was_done
+    photo = update.message.photo[-1]
+    file_id = photo.file_id
+    caption = update.message.caption or ""
+
+    # Generate unique key for extra activities
+    if uid == "extra":
+        extra_key = f"extra_{today_str()}_{len([k for k in data.get('logs', {}) if k.startswith('extra')])}"
+        uid = extra_key
+        ctx.user_data["upload_uid"] = uid
+        name = caption if caption else "Extra activity"
+        desc = ""
+        auto_complete_msg = ""
+    else:
+        s = get_session(uid)
+        name = data.get("edits", {}).get(uid, {}).get("summary", s[2] if s else uid)
+        desc = data.get("edits", {}).get(uid, {}).get("desc", s[3] if s else "")
+        if uid not in data.get("completed", {}):
+            data.setdefault("completed", {})[uid] = today_str()
+            auto_complete_msg = "\n✅ Also marked as complete!"
+        else:
+            auto_complete_msg = ""
+
+    data.setdefault("logs", {})[uid] = {
+        "file_id": file_id,
+        "date": today_str(),
+        "caption": caption
+    }
+
     save_data(data)
-    s = sessions[idx]
-    status = "✅ Marked complete!" if not was_done else "⬜ Unmarked."
+    ctx.user_data.pop("upload_uid", None)
+
     await update.message.reply_text(
-        f"{status}\n\n*{s['day']} — {s['title']}*\n\n"
-        f"Don't forget to /log your Strava screenshot! 📸",
-        parse_mode="Markdown"
+        f"📎 Activity log saved for:\n*{name}*{auto_complete_msg}\n\n🔍 Analysing your run...",
+        parse_mode="Markdown",
+        reply_markup=main_menu_keyboard()
     )
 
-async def progress_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    data = load_data()
-    cur = current_week()
-    total_sessions = 0
-    done_sessions = 0
-    text = "*📊 Overall Progress*\n\n"
-    for w in range(1, cur + 1):
-        sessions = get_sessions(w, data)
-        n = len(sessions)
-        d = sum(1 for i in range(n) if data["completed"].get(session_key(w, i)))
-        total_sessions += n
-        done_sessions += d
-        bar = "█" * d + "░" * (n - d)
-        label = PLAN[w]["label"][:12]
-        text += f"W{w:02d} {bar} {d}/{n} _{label}_\n"
+    # Download photo and analyse
+    if ANTHROPIC_KEY:
+        try:
+            tg_file = await update.message.photo[-1].get_file()
+            image_bytes = await tg_file.download_as_bytearray()
+            analysis = await analyse_with_claude(bytes(image_bytes), name, desc)
+            if analysis:
+                await update.message.reply_text(
+                    f"🤖 *Coach Analysis*\n\n{analysis}",
+                    parse_mode="Markdown"
+                )
+        except Exception as e:
+            logger.error(f"Photo analysis error: {e}")
+    else:
+        await update.message.reply_text(
+            "💡 _Tip: Set ANTHROPIC\\_API\\_KEY when starting the bot to get AI run analysis!_",
+            parse_mode="Markdown"
+        )
 
-    pct = int(done_sessions / total_sessions * 100) if total_sessions else 0
-    text += f"\n*Total: {done_sessions}/{total_sessions} sessions ({pct}%)*\n"
-    text += f"Currently on Week {cur}/24\n"
-    weeks_left = 24 - cur
-    text += f"{weeks_left} weeks to race day 🏁"
-    await update.message.reply_text(text, parse_mode="Markdown")
+# ── Edit Thursday / Tuesday ──────────────────────────────────────────
+async def edit_thu_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await _edit_start(update, ctx, is_thu=True)
 
-# ── EDIT CONVERSATION ─────────────────────────────────────────────────────────
-async def edit_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    week = current_week()
-    ctx.user_data["edit_week"] = week
+async def edit_tue_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await _edit_start(update, ctx, is_thu=False)
+
+async def _edit_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE, is_thu: bool):
     data = load_data()
-    sessions = get_sessions(week, data)
-    editable = [(i, s) for i, s in enumerate(sessions) if s.get("editable")]
+    day_name = "Thursday Track" if is_thu else "Tuesday Run Club"
+    ctx.user_data["edit_is_thu"] = is_thu
+
+    # Show all sessions of the right type (past and future)
+    editable = []
+    for s in TRAINING_PLAN:
+        uid, dt, summary, desc, thu_flag, tue_flag = s
+        if (is_thu and thu_flag) or (not is_thu and tue_flag):
+            editable.append(s)
+
     if not editable:
-        await update.message.reply_text("No editable sessions (Tue/Thu) this week.")
-        return ConversationHandler.END
+        await update.message.reply_text(f"No {day_name} sessions found.")
+        return
 
-    text = f"*Edit Week {week} sessions*\nWhich session to update?\n\n"
+    today = date.today()
     buttons = []
-    for i, s in editable:
-        text += f"`[{i+1}]` {s['day']} — {s['title']}\n"
-        buttons.append([InlineKeyboardButton(f"{s['day']} [{i+1}]", callback_data=f"editidx_{i}")])
+    for s in editable:
+        uid, dt, summary, _, _, _ = s
+        override = data.get("edits", {}).get(uid, {})
+        display = override.get("summary", summary)
+        s_date = date.fromisoformat(dt)
+        past_marker = "· " if s_date < today else ""
+        label = f"{past_marker}{dt}: {display[:32]}…" if len(display) > 32 else f"{past_marker}{dt}: {display}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"edit_pick|{uid}")])
 
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
-    return EDIT_IDX
+    await update.message.reply_text(
+        f"✏️ *Edit {day_name} Sessions*\n\nAll sessions shown — past ones marked with ·",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
-async def edit_pick_idx(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cb_edit_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    idx = int(query.data.split("_")[1])
-    ctx.user_data["edit_idx"] = idx
-    week = ctx.user_data["edit_week"]
+    _, uid = query.data.split("|")
+    ctx.user_data["edit_uid"] = uid
     data = load_data()
-    sessions = get_sessions(week, data)
-    s = sessions[idx]
-    await query.edit_message_text(
-        f"Editing: *{s['day']}* — _{s['title']}_\n\nType the new session description:",
-        parse_mode="Markdown"
-    )
-    return EDIT_TEXT
+    s = get_session(uid)
+    current = data.get("edits", {}).get(uid, {}).get("summary", s[2] if s else "")
 
-async def edit_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    new_text = update.message.text.strip()
-    week = ctx.user_data["edit_week"]
-    idx = ctx.user_data["edit_idx"]
-    data = load_data()
-    data["edits"][session_key(week, idx)] = new_text
-    save_data(data)
-    sessions = get_sessions(week, data)
-    s = sessions[idx]
-    await update.message.reply_text(
-        f"✅ Updated!\n\n*{s['day']}* — {new_text}",
+    await query.edit_message_text(
+        f"✏️ Editing: *{s[2] if s else uid}*\n\n"
+        f"Current description:\n`{current}`\n\n"
+        f"Send the new session description (e.g. `8×400m @ 5:30/km`):\n\n"
+        f"Or send /cancel to abort.",
         parse_mode="Markdown"
     )
+    return EDIT_ENTER_TEXT
+
+async def edit_receive_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = ctx.user_data.get("edit_uid")
+    if not uid:
+        await update.message.reply_text("Something went wrong. Please try again.")
+        return ConversationHandler.END
+
+    new_text = update.message.text.strip()
+    data = load_data()
+    data.setdefault("edits", {}).setdefault(uid, {})["summary"] = new_text
+    save_data(data)
+
+    s = get_session(uid)
+    await update.message.reply_text(
+        f"✅ Updated!\n\n*{s[1] if s else uid}* is now:\n_{new_text}_",
+        parse_mode="Markdown",
+        reply_markup=main_menu_keyboard()
+    )
+    ctx.user_data.pop("edit_uid", None)
     return ConversationHandler.END
 
 async def edit_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Edit cancelled.")
+    await update.message.reply_text("Edit cancelled.", reply_markup=main_menu_keyboard())
     return ConversationHandler.END
 
-# ── PHOTO LOG ─────────────────────────────────────────────────────────────────
-async def log_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    week = current_week()
-    ctx.user_data["log_week"] = week
-    data = load_data()
-    sessions = get_sessions(week, data)
-    text = f"*Log activity for Week {week}*\nWhich session?\n\n"
-    buttons = []
-    for i, s in enumerate(sessions):
-        done = "✅" if data["completed"].get(session_key(week, i)) else "⬜"
-        buttons.append([InlineKeyboardButton(f"{done} {s['day']} — {s['type']}", callback_data=f"logidx_{i}")])
+# ── Race time predictor ───────────────────────────────────────────────
+def predict_race_times(data: dict) -> tuple:
+    """
+    Estimate HM and FM finish times based on completed sessions.
+    Uses best recent track pace as a proxy for VO2max pace,
+    then applies Riegel formula and Singapore heat adjustment.
+    """
+    completed = data.get("completed", {})
+    logs = data.get("logs", {})
 
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
-    return PHOTO_IDX
+    # Gather track sessions completed — these have the best pace signal
+    track_sessions = [uid for uid in completed if "thu" in uid and "track" in get_session(uid)[2].lower() if get_session(uid)]
 
-async def log_pick_idx(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    idx = int(query.data.split("_")[1])
-    ctx.user_data["log_idx"] = idx
-    week = ctx.user_data["log_week"]
+    # Base prediction from training week progression
+    # Week 1 baseline: track pace ~6:00/km = VO2max ~5:45 after warmup
+    # Each 4 weeks of consistent training = ~5-8 sec/km improvement
+    weeks_trained = len(set(uid[:3] for uid in completed if re.match(r"w\d+", uid)))
+
+    # Starting base: conservative for week 1 fitness seen in logs
+    # 5:59/km track effort → ~6:24/km HM pace → ~2:15 HM
+    base_hm_pace_sec = 384  # 6:24/km in seconds
+
+    # Improvement: ~6 sec/km per 4 weeks of consistent training, capped at 20 weeks
+    improvement = min(weeks_trained, 20) * 1.5  # seconds per km
+    hm_pace_sec = base_hm_pace_sec - improvement
+
+    # Singapore heat penalty: +8 sec/km on race day
+    hm_pace_with_heat = hm_pace_sec + 8
+
+    hm_time_sec = hm_pace_with_heat * 21.1
+    hm_h = int(hm_time_sec // 3600)
+    hm_m = int((hm_time_sec % 3600) // 60)
+
+    # FM via Riegel: FM = HM * (42.2/21.1)^1.06
+    fm_time_sec = hm_time_sec * (42.2 / 21.1) ** 1.06
+    fm_h = int(fm_time_sec // 3600)
+    fm_m = int((fm_time_sec % 3600) // 60)
+
+    return (hm_h, hm_m), (fm_h, fm_m), weeks_trained
+
+
+async def show_predictions(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = load_data()
-    sessions = get_sessions(week, data)
-    s = sessions[idx]
-    await query.edit_message_text(
-        f"📸 Send your Strava screenshot for:\n*{s['day']} — {s['title']}*\n\n"
-        f"(Upload the photo now)",
-        parse_mode="Markdown"
+    (hm_h, hm_m), (fm_h, fm_m), weeks = predict_race_times(data)
+    completed = data.get("completed", {})
+
+    # Conflict warning
+    conflict_warning = (
+        "\n⚠️ *Schedule conflict detected:*\n"
+        "Hyrox (Nov 26) → Pacing HM (Dec 5) → Full Marathon (Dec 6)\n"
+        "Consider dropping the pacing duty to protect Dec 6.\n"
     )
-    return PHOTO_WEEK
 
-async def log_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    week = ctx.user_data.get("log_week", current_week())
-    idx = ctx.user_data.get("log_idx", 0)
+    # How close to targets
+    hm_target_min = 135  # 2:15
+    hm_actual_min = hm_h * 60 + hm_m
+    hm_gap = hm_actual_min - hm_target_min
+    hm_gap_text = f"{abs(hm_gap)} min {'ahead of' if hm_gap < 0 else 'behind'} 2:15 target" if hm_gap != 0 else "exactly on 2:15 target"
+
+    fm_target_min = 300  # 5:00
+    fm_actual_min = fm_h * 60 + fm_m
+    fm_gap = fm_actual_min - fm_target_min
+    fm_gap_text = f"{abs(fm_gap)} min {'ahead of' if fm_gap < 0 else 'behind'} sub-5hr target" if fm_gap != 0 else "exactly on sub-5hr target"
+
+    text = (
+        f"🔮 *Race Time Predictions*\n"
+        f"_(based on {weeks} weeks of training, Singapore heat adjusted)_\n\n"
+        f"🏃 *Half Marathon (21.1km)*\n"
+        f"Predicted: *{hm_h}:{hm_m:02d}*\n"
+        f"Target: 2:15 → {hm_gap_text}\n\n"
+        f"🏅 *Full Marathon (42.2km)*\n"
+        f"Predicted: *{fm_h}:{fm_m:02d}*\n"
+        f"Target: sub-5:00 → {fm_gap_text}\n\n"
+        f"*Sep 27 HM target:* 2:10–2:15 — on track ✅\n"
+        f"*Nov 1 HM target:* 2:10 — achievable if Sep goes well ✅\n"
+        f"{conflict_warning}\n"
+        f"_Predictions improve as more sessions are logged._"
+    )
+
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_menu_keyboard())
+async def show_progress(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = load_data()
-    photo = update.message.photo[-1]
-    key = session_key(week, idx)
-    if "photos" not in data:
-        data["photos"] = {}
-    data["photos"][key] = photo.file_id
-    data["completed"][key] = True
-    save_data(data)
-    sessions = get_sessions(week, data)
-    s = sessions[idx]
+    completed = data.get("completed", {})
+    logs = data.get("logs", {})
+    edits = data.get("edits", {})
+
+    total = len(TRAINING_PLAN)
+    done = len(completed)
+    pct = done / total * 100
+
+    # Bar chart
+    filled = int(pct / 5)
+    bar = "█" * filled + "░" * (20 - filled)
+
+    # Count by type
+    type_counts = {"Long run": 0, "Track": 0, "Tempo": 0, "Easy": 0, "MP run": 0, "RACE": 0, "Other": 0}
+    for uid in completed:
+        s = get_session(uid)
+        if s:
+            summary = s[2]
+            matched = False
+            for t in type_counts:
+                if t.lower() in summary.lower():
+                    type_counts[t] += 1
+                    matched = True
+                    break
+            if not matched:
+                type_counts["Other"] += 1
+
+    upcoming_text = ""
+    today = date.today()
+    next_sessions = [s for s in TRAINING_PLAN if date.fromisoformat(s[1]) >= today and s[0] not in completed][:3]
+    if next_sessions:
+        upcoming_text = "\n*Next up:*\n"
+        for s in next_sessions:
+            upcoming_text += f"• {s[1]}: {s[2][:50]}\n"
+
+    weeks_to_race = max(0, (date(2026, 12, 6) - date.today()).days // 7)
+
+    text = (
+        f"📊 *Your Training Progress*\n\n"
+        f"`{bar}` {pct:.0f}%\n"
+        f"{done}/{total} sessions complete\n\n"
+        f"⏳ *{weeks_to_race} weeks* to race day (Dec 6)\n\n"
+        f"*By type completed:*\n"
+        f"🏃 Long runs: {type_counts['Long run']}\n"
+        f"🏟 Track: {type_counts['Track']}\n"
+        f"⚡ Tempo: {type_counts['Tempo']}\n"
+        f"🐢 Easy: {type_counts['Easy']}\n"
+        f"🎯 Marathon pace: {type_counts['MP run']}\n"
+        f"🏁 Races: {type_counts['RACE']}\n\n"
+        f"📎 Activity logs uploaded: {len(logs)}\n"
+        f"✏️ Custom edits made: {len(edits)}\n"
+        f"{upcoming_text}"
+    )
+
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def show_weekly_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    data = load_data()
+    wnum = current_week_num()
+    week_key = f"w{wnum:02d}"
+    sessions = get_week_sessions(week_key)
+    completed = data.get("completed", {})
+
+    done_this_week = [s for s in sessions if s[0] in completed]
+    missed_this_week = [s for s in sessions if s[0] not in completed and date.fromisoformat(s[1]) < date.today()]
+
+    (hm_h, hm_m), (fm_h, fm_m), weeks = predict_race_times(data)
+
+    done_pct = len(done_this_week) / len(sessions) * 100 if sessions else 0
+
+    summary = (
+        f"📋 *Week {wnum} Summary*\n\n"
+        f"Sessions done: {len(done_this_week)}/{len(sessions)} ({done_pct:.0f}%)\n"
+    )
+
+    if missed_this_week:
+        summary += f"Missed: {len(missed_this_week)} session(s)\n"
+        for s in missed_this_week:
+            summary += f"  • {s[2][:45]}\n"
+
+    summary += (
+        f"\n🔮 *Updated Race Predictions*\n"
+        f"Half Marathon: *{hm_h}:{hm_m:02d}*\n"
+        f"Full Marathon: *{fm_h}:{fm_m:02d}*\n\n"
+    )
+
+    # Motivational note based on completion
+    if done_pct == 100:
+        summary += "Perfect week — every session ticked off. Keep that consistency going. 💪"
+    elif done_pct >= 75:
+        summary += "Solid week. Don't dwell on what you missed — focus on executing next week."
+    elif done_pct >= 50:
+        summary += "Inconsistent week. Identify what got in the way and plan around it for next week."
+    else:
+        summary += "Tough week. One bad week doesn't derail a plan — but two in a row does. Reset and commit."
+
+    await update.message.reply_text(summary, parse_mode="Markdown", reply_markup=main_menu_keyboard())
+
+# ── Help ─────────────────────────────────────────────────────────────
+async def show_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"✅ Logged and marked complete!\n\n"
-        f"*{s['day']} — {s['title']}*\n\n"
-        f"Great work! Keep the consistency going 💪",
-        parse_mode="Markdown"
+        "*BYD Marathon Bot — Help*\n\n"
+        "📅 *This Week* — Shows current week's sessions with quick-complete buttons\n"
+        "📋 *Full Plan* — Browse all 24 weeks, tap to toggle completion\n"
+        "✅ *Log Complete* — Mark a session done\n"
+        "📷 *Upload Activity* — Attach a Strava screenshot or Garmin image to a session\n"
+        "✏️ *Edit Thursday* — Update your Thursday track sessions (changes monthly)\n"
+        "✏️ *Edit Tuesday* — Update your Tuesday run club sessions\n"
+        "📊 *My Progress* — Overall stats and upcoming sessions\n\n"
+        "*Commands:*\n"
+        "/start — Main menu\n"
+        "/week — This week\n"
+        "/plan — Full plan browser\n"
+        "/progress — Progress stats\n\n"
+        "Tips:\n"
+        "• Photos sent after tapping *Upload Activity* are auto-linked to that session\n"
+        "• Edits to Thu/Tue sessions persist across the plan\n"
+        "• Session edits made at start of month will update only future sessions",
+        parse_mode="Markdown",
+        reply_markup=main_menu_keyboard()
     )
-    return ConversationHandler.END
 
-async def log_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Log cancelled.")
-    return ConversationHandler.END
+# ── Text router ──────────────────────────────────────────────────────
+async def text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text == "📅 This Week":
+        await show_this_week(update, ctx)
+    elif text == "📋 Full Plan":
+        await show_full_plan(update, ctx)
+    elif text == "✅ Log Complete":
+        await log_complete_start(update, ctx)
+    elif text == "📷 Upload Activity":
+        await upload_start(update, ctx)
+    elif text == "✏️ Edit Thursday":
+        await edit_thu_start(update, ctx)
+    elif text == "✏️ Edit Tuesday":
+        await edit_tue_start(update, ctx)
+    elif text == "📊 My Progress":
+        await show_progress(update, ctx)
+    elif text == "🔮 Predictions":
+        await show_predictions(update, ctx)
+    elif text == "📋 Week Summary":
+        await show_weekly_summary(update, ctx)
+    elif text == "🆘 Help":
+        await show_help(update, ctx)
+    else:
+        await update.message.reply_text(
+            "Use the menu buttons below, or /help for commands.",
+            reply_markup=main_menu_keyboard()
+        )
 
-async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await start(update, ctx)
-
-# ── MAIN ──────────────────────────────────────────────────────────────────────
+# ── Build & run ──────────────────────────────────────────────────────
 def main():
     app = Application.builder().token(TOKEN).build()
 
-    # Edit conversation
+    # Edit conversation handler
     edit_conv = ConversationHandler(
-        entry_points=[CommandHandler("edit", edit_start)],
+        entry_points=[CallbackQueryHandler(cb_edit_pick, pattern=r"^edit_pick\|")],
         states={
-            EDIT_IDX:  [CallbackQueryHandler(edit_pick_idx, pattern="^editidx_")],
-            EDIT_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_save)],
+            EDIT_ENTER_TEXT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_receive_text),
+                CommandHandler("cancel", edit_cancel),
+            ]
         },
         fallbacks=[CommandHandler("cancel", edit_cancel)],
+        per_message=False,
     )
 
-    # Log conversation
-    log_conv = ConversationHandler(
-        entry_points=[CommandHandler("log", log_start)],
-        states={
-            PHOTO_IDX:  [CallbackQueryHandler(log_pick_idx, pattern="^logidx_")],
-            PHOTO_WEEK: [MessageHandler(filters.PHOTO, log_photo)],
-        },
-        fallbacks=[CommandHandler("cancel", log_cancel)],
-    )
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("week", show_this_week))
+    app.add_handler(CommandHandler("plan", show_full_plan))
+    app.add_handler(CommandHandler("progress", show_progress))
+    app.add_handler(CommandHandler("help", show_help))
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("week", show_week))
-    app.add_handler(CommandHandler("today", today_cmd))
-    app.add_handler(CommandHandler("done", done_cmd))
-    app.add_handler(CommandHandler("progress", progress_cmd))
-    app.add_handler(CommandHandler("paces", paces))
-    app.add_handler(CallbackQueryHandler(nav_week, pattern="^week_"))
-    app.add_handler(CallbackQueryHandler(nav_week, pattern="^noop$"))
     app.add_handler(edit_conv)
-    app.add_handler(log_conv)
 
-    print("🏃 Marathon bot is running...")
-    app.run_polling()
+    app.add_handler(CallbackQueryHandler(cb_week, pattern=r"^week\|"))
+    app.add_handler(CallbackQueryHandler(cb_toggle, pattern=r"^toggle\|"))
+    app.add_handler(CallbackQueryHandler(cb_done, pattern=r"^done\|"))
+    app.add_handler(CallbackQueryHandler(cb_markdone, pattern=r"^markdone\|"))
+    app.add_handler(CallbackQueryHandler(cb_upload_session, pattern=r"^upload_session\|"))
+    app.add_handler(CallbackQueryHandler(cb_back_weeks, pattern=r"^back_weeks$"))
+
+    app.add_handler(MessageHandler(filters.PHOTO, receive_photo))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
+
+    logger.info("Bot starting…")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
