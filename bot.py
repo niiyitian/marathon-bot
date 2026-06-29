@@ -205,7 +205,7 @@ def main_menu_keyboard():
             ["📊 My Progress", "🔮 Predictions"],
             ["📋 Week Summary", "👟 Gear Tracker"],
             ["🏁 Race Debrief", "🗓 Race Manager"],
-            ["🆘 Help"],
+            ["📈 Mileage", "🆘 Help"],
         ],
         resize_keyboard=True
     )
@@ -591,10 +591,14 @@ async def receive_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Photo analysis error: {e}")
 
-        # Extract distance and ask which shoe
+        # Extract distance and ask which shoe + auto-log mileage
         try:
             km = await extract_distance_from_image(image_bytes)
             if km > 0:
+                # Auto-log mileage for current week
+                log_mileage(data, current_week_num(), km)
+                save_data(data)
+
                 ctx.user_data["auto_gear_km"] = km
                 shoes = get_shoes(data)
                 buttons = []
@@ -605,7 +609,7 @@ async def receive_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     )])
                 buttons.append([InlineKeyboardButton("⬜ Skip gear tracking", callback_data="autogear|skip|0")])
                 await update.message.reply_text(
-                    f"👟 *Which shoes did you wear?*\n_{km:.1f}km will be added to your choice._",
+                    f"📊 *{km:.1f}km logged to this week's mileage.*\n\n👟 *Which shoes did you wear?*",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(buttons)
                 )
@@ -1278,7 +1282,96 @@ async def race_manager_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Cancelled.", reply_markup=main_menu_keyboard())
     return ConversationHandler.END
 
-# ── Text router ──────────────────────────────────────────────────────
+# ── Mileage tracker ──────────────────────────────────────────────────
+# Planned km per week (approximate based on plan)
+WEEKLY_KM_TARGETS = {
+    1: 20, 2: 24, 3: 28, 4: 20, 5: 32, 6: 36, 7: 38, 8: 42,
+    9: 28, 10: 44, 11: 46, 12: 32, 13: 20, 14: 22, 15: 18,
+    16: 44, 17: 48, 18: 46, 19: 18, 20: 30, 21: 42, 22: 36,
+    23: 24, 24: 10
+}
+
+def get_mileage(data: dict) -> dict:
+    """Return mileage dict {week_num: km}"""
+    return data.get("mileage", {})
+
+def log_mileage(data: dict, week_num: int, km: float):
+    data.setdefault("mileage", {})
+    wk = str(week_num)
+    data["mileage"][wk] = round(data["mileage"].get(wk, 0.0) + km, 1)
+
+async def show_mileage(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    data = load_data()
+    mileage = get_mileage(data)
+    wnum = current_week_num()
+
+    # Current week
+    this_week_km = mileage.get(str(wnum), 0.0)
+    this_week_target = WEEKLY_KM_TARGETS.get(wnum, 30)
+    pct = min(this_week_km / this_week_target, 1.0)
+    filled = int(pct * 10)
+    bar = "█" * filled + "░" * (10 - filled)
+
+    # Total
+    total_km = sum(mileage.values())
+    total_runs = len([k for k in data.get("logs", {}) if not k.startswith("extra") or True])
+
+    # Last 4 weeks trend
+    trend = ""
+    for w in range(max(1, wnum - 3), wnum + 1):
+        wkm = mileage.get(str(w), 0.0)
+        wtgt = WEEKLY_KM_TARGETS.get(w, 30)
+        wpct = min(wkm / wtgt, 1.0)
+        wfilled = int(wpct * 6)
+        wbar = "█" * wfilled + "░" * (6 - wfilled)
+        trend += f"W{w:02d}: {wbar} {wkm:.1f}/{wtgt}km\n"
+
+    text = (
+        f"📊 *Mileage Tracker*\n\n"
+        f"*This week (W{wnum:02d}):*\n"
+        f"{bar} {this_week_km:.1f}/{this_week_target}km ({pct*100:.0f}%)\n\n"
+        f"*Last 4 weeks:*\n{trend}\n"
+        f"*Total logged:* {total_km:.1f}km across all runs\n\n"
+        f"_Mileage is auto-logged when you upload activity screenshots._"
+    )
+
+    # Manual log button
+    buttons = [[InlineKeyboardButton("➕ Log km manually", callback_data="mileage_manual")]]
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+
+async def cb_mileage_manual(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    wnum = current_week_num()
+    ctx.user_data["mileage_week"] = wnum
+    await query.edit_message_text(
+        f"📊 Log km for Week {wnum}\n\nHow many km did you run? (e.g. `8.5`)\n\nSend /cancel to abort."
+    )
+    return "MILEAGE_ENTER"
+
+async def mileage_enter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        km = float(update.message.text.strip().replace(",", "."))
+    except ValueError:
+        await update.message.reply_text("Please send a number like `8.5`", parse_mode="Markdown")
+        return "MILEAGE_ENTER"
+    wnum = ctx.user_data.get("mileage_week", current_week_num())
+    data = load_data()
+    log_mileage(data, wnum, km)
+    save_data(data)
+    total = data["mileage"].get(str(wnum), 0.0)
+    target = WEEKLY_KM_TARGETS.get(wnum, 30)
+    await update.message.reply_text(
+        f"✅ Logged {km}km for W{wnum:02d}\nWeek total: {total:.1f}/{target}km",
+        reply_markup=main_menu_keyboard()
+    )
+    return ConversationHandler.END
+
+async def mileage_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Cancelled.", reply_markup=main_menu_keyboard())
+    return ConversationHandler.END
+
+
 async def text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if text == "📅 This Week":
@@ -1305,6 +1398,8 @@ async def text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await race_debrief_start(update, ctx)
     elif text == "🗓 Race Manager":
         await show_race_manager(update, ctx)
+    elif text == "📈 Mileage":
+        await show_mileage(update, ctx)
     elif text == "🆘 Help":
         await show_help(update, ctx)
     else:
@@ -1370,6 +1465,16 @@ def main():
         per_message=False,
     )
 
+    # Mileage manual entry conversation
+    mileage_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_mileage_manual, pattern=r"^mileage_manual$")],
+        states={
+            "MILEAGE_ENTER": [MessageHandler(filters.TEXT & ~filters.COMMAND, mileage_enter)],
+        },
+        fallbacks=[CommandHandler("cancel", mileage_cancel)],
+        per_message=False,
+    )
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("week", show_this_week))
     app.add_handler(CommandHandler("plan", show_full_plan))
@@ -1380,6 +1485,7 @@ def main():
     app.add_handler(gear_conv)
     app.add_handler(debrief_conv)
     app.add_handler(race_conv)
+    app.add_handler(mileage_conv)
     app.add_handler(CallbackQueryHandler(cb_autogear, pattern=r"^autogear\|"))
     app.add_handler(CallbackQueryHandler(cb_race_remove, pattern=r"^race_remove\|"))
 
@@ -1398,4 +1504,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-# updated
