@@ -20,7 +20,7 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-TOKEN = os.environ.get("BOT_TOKEN", "8727762251:AAG93BHLqI8L9qUc6Aqv7rqHJHp7j4BSbT0")
+TOKEN = os.environ.get("BOT_TOKEN", "8727762251:AAG4HRx7CT-8G132mfxdZQRR3cyUxit1_xM")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 DATA_FILE = Path("data.json")
 
