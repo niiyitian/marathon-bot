@@ -419,18 +419,6 @@ async def cb_markdone(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"✅ *{name}*\n\nMarked complete on {today_str()} 🎉\n\nUse *Upload Activity* to attach a Strava screenshot.",
         parse_mode="Markdown"
     )
-    # Ask recovery
-    await query.message.reply_text(
-        "😴 *Recovery check — how did you wake up today?*\n\n"
-        "_Check your Garmin for guidance:_",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("😴 Slept well — Sleep ≥72 or HRV ≥60ms", callback_data=f"recovery|good|{uid}")],
-            [InlineKeyboardButton("😐 Average — Sleep 58–71 or HRV 52–59ms", callback_data=f"recovery|avg|{uid}")],
-            [InlineKeyboardButton("😫 Poor — Sleep <58 or HRV <52ms / 🟠", callback_data=f"recovery|poor|{uid}")],
-            [InlineKeyboardButton("⬜ Skip", callback_data=f"recovery|skip|{uid}")],
-        ])
-    )
 
 # ── Upload activity ──────────────────────────────────────────────────
 async def upload_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -481,27 +469,31 @@ async def analyse_with_claude(image_bytes: bytes, session_summary: str, session_
         return ""
     b64 = base64.standard_b64encode(image_bytes).decode()
 
+    MAX_HR = 184  # Yitian's max HR
+
     recovery_context = ""
     if recovery == "good":
-        recovery_context = "The athlete reported good recovery (sleep score ≥72 or HRV ≥60ms) going into this session. "
+        recovery_context = "The athlete reported good recovery this morning (sleep score ≥72 or HRV ≥60ms). "
     elif recovery == "avg":
-        recovery_context = "The athlete reported average recovery (sleep score 58–71 or HRV 52–59ms) going into this session. "
+        recovery_context = "The athlete reported average recovery this morning (sleep score 58–71 or HRV 52–59ms). "
     elif recovery == "poor":
-        recovery_context = "The athlete reported poor recovery (sleep score <58 or HRV <52ms / unbalanced) going into this session — factor this into your assessment of the performance. "
+        recovery_context = "The athlete reported poor recovery this morning (sleep score <58 or HRV <52ms / unbalanced) — factor this into your assessment. "
 
     prompt = (
         f"You are an experienced marathon running coach — direct, knowledgeable, and encouraging but honest. "
         f"The athlete trains in Singapore (year-round heat 28–34°C, humidity 70–90%). "
-        f"Heart rates in Singapore will naturally run 5–10 bpm higher than in cool conditions — factor this in when assessing effort vs pace. "
+        f"Heart rates in Singapore run 5–10 bpm higher than cool conditions — account for this. "
+        f"Athlete max HR is {MAX_HR}bpm. Use these HR zones for RPE:\n"
+        f"Z1 <129bpm (RPE 3–4), Z2 129–147 (RPE 5–6), Z3 148–165 (RPE 7), Z4 166–175 (RPE 8–9), Z5 >175 (RPE 10)\n"
         f"{recovery_context}"
-        f"The planned session was: {session_summary}. Coach's notes: {session_desc}\n\n"
+        f"Planned session: {session_summary}. Coach notes: {session_desc}\n\n"
         f"Analyse this activity screenshot and respond in exactly this format:\n\n"
         f"Rating: X/10\n\n"
+        f"RPE: X/10 (Z[zone] — [e.g. 'avg HR 162 = Z4 threshold effort'])\n\n"
         f"On track: [one sentence comparing actual numbers to the plan target]\n\n"
-        f"Well done: [one specific thing the athlete executed well, citing actual numbers]\n\n"
-        f"Next time: [one concrete, actionable coaching cue for the next session]\n\n"
-        f"Use actual numbers from the screenshot. Sound like a coach, not a chatbot — "
-        f"firm, specific, and motivating. No emojis. No filler phrases like 'great job' or 'awesome'."
+        f"Well done: [one specific thing done well, with actual numbers]\n\n"
+        f"Next time: [one concrete, actionable coaching cue]\n\n"
+        f"Use actual numbers from the screenshot. Firm, specific, motivating. No emojis. No filler."
     )
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -610,7 +602,7 @@ async def receive_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Run coach analysis
     if ANTHROPIC_KEY:
         try:
-            recovery = data.get("recovery", {}).get(uid, {}).get("rating", "")
+            recovery = data.get("sleep_log", {}).get(today_str(), "")
             analysis = await analyse_with_claude(image_bytes, name, desc, recovery)
             if analysis:
                 await update.message.reply_text(
@@ -1531,7 +1523,46 @@ RACE_CHECKLISTS = {
     }
 }
 
-async def check_and_send_race_checklists(app):
+async def send_morning_sleep_prompt(app):
+    """Sent every morning at 7am SGT."""
+    chat_id = load_chat_id()
+    if not chat_id:
+        return
+    await app.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "🌅 *Good morning, Yitian!*\n\n"
+            "What's your Garmin sleep score this morning?\n\n"
+            "_Check Garmin Connect → Sleep_"
+        ),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("😴 Good — Score ≥72 or HRV ≥60ms", callback_data="sleep|good")],
+            [InlineKeyboardButton("😐 Average — Score 58–71 or HRV 52–59ms", callback_data="sleep|avg")],
+            [InlineKeyboardButton("😫 Poor — Score <58 or HRV <52ms / 🟠", callback_data="sleep|poor")],
+            [InlineKeyboardButton("⬜ Skip today", callback_data="sleep|skip")],
+        ])
+    )
+
+async def cb_sleep_log(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, rating = query.data.split("|")
+
+    if rating == "skip":
+        await query.edit_message_text("Skipped — have a good training day! 👟")
+        return
+
+    data = load_data()
+    data.setdefault("sleep_log", {})[today_str()] = rating
+    save_data(data)
+
+    responses = {
+        "good": "Noted ✅ — green light for today's session. Hit your targets.",
+        "avg": "Noted — average recovery. Train as planned but don't force it if something feels off.",
+        "poor": "Noted ⚠️ — below baseline. Complete the session but reduce intensity if HR climbs too high early."
+    }
+    await query.edit_message_text(responses[rating])
     import datetime as dt
     target = (date.today() + dt.timedelta(days=3)).isoformat()
     for uid, info in RACE_CHECKLISTS.items():
@@ -1692,6 +1723,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_autogear, pattern=r"^autogear\|"))
     app.add_handler(CallbackQueryHandler(cb_race_remove, pattern=r"^race_remove\|"))
     app.add_handler(CallbackQueryHandler(cb_recovery, pattern=r"^recovery\|"))
+    app.add_handler(CallbackQueryHandler(cb_sleep_log, pattern=r"^sleep\|"))
 
     app.add_handler(CallbackQueryHandler(cb_week, pattern=r"^week\|"))
     app.add_handler(CallbackQueryHandler(cb_toggle, pattern=r"^toggle\|"))
@@ -1706,6 +1738,7 @@ def main():
     # Scheduler for Monday briefing + race checklists
     scheduler = AsyncIOScheduler(timezone=SGT)
     scheduler.add_job(send_monday_briefing, "cron", day_of_week="mon", hour=7, minute=0, args=[app])
+    scheduler.add_job(send_morning_sleep_prompt, "cron", hour=7, minute=0, args=[app])
     scheduler.add_job(check_and_send_race_checklists, "cron", hour=8, minute=0, args=[app])
     scheduler.start()
 
