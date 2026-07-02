@@ -421,12 +421,13 @@ async def cb_markdone(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     # Ask recovery
     await query.message.reply_text(
-        "😴 *How was your recovery going into today's session?*",
+        "😴 *Recovery check — how did you wake up today?*\n\n"
+        "_Check your Garmin for guidance:_",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("😴 Slept well, felt fresh", callback_data=f"recovery|good|{uid}")],
-            [InlineKeyboardButton("😐 Average, a bit tired", callback_data=f"recovery|avg|{uid}")],
-            [InlineKeyboardButton("😫 Poor sleep / fatigued", callback_data=f"recovery|poor|{uid}")],
+            [InlineKeyboardButton("😴 Slept well — Sleep ≥72 or HRV ≥60ms", callback_data=f"recovery|good|{uid}")],
+            [InlineKeyboardButton("😐 Average — Sleep 58–71 or HRV 52–59ms", callback_data=f"recovery|avg|{uid}")],
+            [InlineKeyboardButton("😫 Poor — Sleep <58 or HRV <52ms / 🟠", callback_data=f"recovery|poor|{uid}")],
             [InlineKeyboardButton("⬜ Skip", callback_data=f"recovery|skip|{uid}")],
         ])
     )
@@ -474,15 +475,25 @@ async def cb_upload_session(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-async def analyse_with_claude(image_bytes: bytes, session_summary: str, session_desc: str) -> str:
+async def analyse_with_claude(image_bytes: bytes, session_summary: str, session_desc: str, recovery: str = "") -> str:
     """Send screenshot to Claude and get run analysis."""
     if not ANTHROPIC_KEY:
         return ""
     b64 = base64.standard_b64encode(image_bytes).decode()
+
+    recovery_context = ""
+    if recovery == "good":
+        recovery_context = "The athlete reported good recovery (sleep score ≥72 or HRV ≥60ms) going into this session. "
+    elif recovery == "avg":
+        recovery_context = "The athlete reported average recovery (sleep score 58–71 or HRV 52–59ms) going into this session. "
+    elif recovery == "poor":
+        recovery_context = "The athlete reported poor recovery (sleep score <58 or HRV <52ms / unbalanced) going into this session — factor this into your assessment of the performance. "
+
     prompt = (
         f"You are an experienced marathon running coach — direct, knowledgeable, and encouraging but honest. "
         f"The athlete trains in Singapore (year-round heat 28–34°C, humidity 70–90%). "
         f"Heart rates in Singapore will naturally run 5–10 bpm higher than in cool conditions — factor this in when assessing effort vs pace. "
+        f"{recovery_context}"
         f"The planned session was: {session_summary}. Coach's notes: {session_desc}\n\n"
         f"Analyse this activity screenshot and respond in exactly this format:\n\n"
         f"Rating: X/10\n\n"
@@ -599,7 +610,8 @@ async def receive_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Run coach analysis
     if ANTHROPIC_KEY:
         try:
-            analysis = await analyse_with_claude(image_bytes, name, desc)
+            recovery = data.get("recovery", {}).get(uid, {}).get("rating", "")
+            analysis = await analyse_with_claude(image_bytes, name, desc, recovery)
             if analysis:
                 await update.message.reply_text(
                     f"🤖 *Coach Analysis*\n\n{analysis}",
