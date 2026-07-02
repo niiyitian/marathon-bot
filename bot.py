@@ -9,8 +9,10 @@ import re
 import logging
 import base64
 import httpx
+import pytz
 from datetime import datetime, date
 from pathlib import Path
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
@@ -212,6 +214,7 @@ def main_menu_keyboard():
 
 # ── /start ───────────────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    save_chat_id(update.effective_chat.id)
     await update.message.reply_text(
         "👟 *BYD Marathon 2026 Training Bot*\n\n"
         "I'll help you track your 24-week plan to sub-5hr on Dec 6 🏅\n\n"
@@ -412,7 +415,21 @@ async def cb_markdone(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     save_data(data)
     s = get_session(uid)
     name = s[2] if s else uid
-    await query.edit_message_text(f"✅ *{name}*\n\nMarked complete on {today_str()} 🎉\n\nUse *Upload Activity* to attach a Strava screenshot.", parse_mode="Markdown")
+    await query.edit_message_text(
+        f"✅ *{name}*\n\nMarked complete on {today_str()} 🎉\n\nUse *Upload Activity* to attach a Strava screenshot.",
+        parse_mode="Markdown"
+    )
+    # Ask recovery
+    await query.message.reply_text(
+        "😴 *How was your recovery going into today's session?*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("😴 Slept well, felt fresh", callback_data=f"recovery|good|{uid}")],
+            [InlineKeyboardButton("😐 Average, a bit tired", callback_data=f"recovery|avg|{uid}")],
+            [InlineKeyboardButton("😫 Poor sleep / fatigued", callback_data=f"recovery|poor|{uid}")],
+            [InlineKeyboardButton("⬜ Skip", callback_data=f"recovery|skip|{uid}")],
+        ])
+    )
 
 # ── Upload activity ──────────────────────────────────────────────────
 async def upload_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1390,6 +1407,159 @@ async def mileage_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+SGT = pytz.timezone("Asia/Singapore")
+CHAT_ID_FILE = Path("chat_id.txt")
+
+def save_chat_id(chat_id: int):
+    CHAT_ID_FILE.write_text(str(chat_id))
+
+def load_chat_id():
+    if CHAT_ID_FILE.exists():
+        try:
+            return int(CHAT_ID_FILE.read_text().strip())
+        except:
+            return None
+    return None
+
+# ── Monday morning briefing ───────────────────────────────────────────
+async def send_monday_briefing(app):
+    chat_id = load_chat_id()
+    if not chat_id:
+        return
+
+    data = load_data()
+    wnum = current_week_num()
+    week_key = f"w{wnum:02d}"
+    sessions = get_week_sessions(week_key)
+    completed = data.get("completed", {})
+
+    session_lines = ""
+    for s in sessions:
+        done = "✅" if s[0] in completed else "⬜"
+        session_lines += f"{done} {s[1]}: {s[2][:55]}\n"
+
+    km_target = WEEKLY_KM_TARGETS.get(wnum, 30)
+    last_week_km = data.get("mileage", {}).get(str(wnum - 1), 0.0)
+    weeks_left = max(0, (date(2026, 12, 6) - date.today()).days // 7)
+
+    race_alert = ""
+    for s in sessions:
+        if "RACE" in s[2] or "🏁" in s[2]:
+            race_alert = f"\n🏁 *Race this week!* {s[2]}\n"
+
+    injury_warn = ""
+    last_wk_km = data.get("mileage", {}).get(str(wnum - 1), 0.0)
+    two_wk_km = data.get("mileage", {}).get(str(wnum - 2), 0.0)
+    if last_wk_km > 0 and two_wk_km > 0:
+        jump = (last_wk_km - two_wk_km) / two_wk_km * 100
+        if jump > 15:
+            injury_warn = f"\n⚠️ *Mileage jumped {jump:.0f}% last week* — ease into this week.\n"
+
+    if wnum <= 4:
+        focus = "Base building. Keep every easy run actually easy — HR under 145."
+    elif wnum <= 8:
+        focus = "Building phase. Hit your track targets but don't chase the club pace on Tuesdays."
+    elif wnum <= 14:
+        focus = "Peak phase. Prioritise sleep and nutrition — the long runs matter most now."
+    elif wnum <= 20:
+        focus = "Race prep. Trust the taper. Less is more this week."
+    else:
+        focus = "Final stretch. Stay healthy, stay consistent. Dec 6 is close."
+
+    msg = (
+        f"🌅 *Good morning, Yitian! Week {wnum} starts today.*\n\n"
+        f"*{weeks_left} weeks to BYD Marathon (Dec 6)*\n"
+        f"{race_alert}{injury_warn}\n"
+        f"*This week's sessions:*\n{session_lines}\n"
+        f"*Weekly km target:* {km_target}km\n"
+        f"*Last week logged:* {last_week_km:.1f}km\n\n"
+        f"*Focus this week:*\n_{focus}_"
+    )
+    await app.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+
+# ── Pre-race checklist ────────────────────────────────────────────────
+RACE_CHECKLISTS = {
+    "w14_sat": {
+        "name": "Sep 27 Half Marathon",
+        "checklist": [
+            "Kit laid out: singlet, shorts, socks, race shoes",
+            "Bib picked up and pinned",
+            "2 gels packed (take at 45min)",
+            "Race plan: start @ 6:25/km, negative split second half",
+            "Dinner tonight: carbs, familiar food, nothing new",
+            "Sleep by 10pm — race start is early",
+            "Garmin charged and synced",
+        ]
+    },
+    "w19_sat": {
+        "name": "Nov 1 Half Marathon",
+        "checklist": [
+            "Kit laid out: singlet, shorts, socks, race shoes",
+            "Bib picked up and pinned",
+            "3 gels packed (marathon effort — fuel more)",
+            "Race plan: run @ 7:00–7:05/km marathon effort, NOT racing",
+            "Dinner tonight: carbs, familiar food",
+            "Sleep by 10pm",
+            "Remember: this is a training run with a bib, not a race",
+        ]
+    },
+    "w24_sun": {
+        "name": "Dec 6 BYD Full Marathon",
+        "checklist": [
+            "Race kit laid out the night before",
+            "Bib pinned",
+            "5 gels packed (every 45min from 45min mark)",
+            "Race plan: 7:15/km first 10km, settle 7:05 from 10–30km",
+            "Breakfast: 2–3hrs before start, familiar food",
+            "Garmin fully charged",
+            "Body Glide / anti-chafe applied",
+            "Sleep early Dec 5 — pacing duty first but rest after",
+            "You've done the work. Trust the training.",
+        ]
+    }
+}
+
+async def check_and_send_race_checklists(app):
+    import datetime as dt
+    target = (date.today() + dt.timedelta(days=3)).isoformat()
+    for uid, info in RACE_CHECKLISTS.items():
+        s = get_session(uid)
+        if s and s[1] == target:
+            chat_id = load_chat_id()
+            if not chat_id:
+                return
+            items = "\n".join(f"☐ {item}" for item in info["checklist"])
+            msg = (
+                f"🏁 *3 days to {info['name']}!*\n\n"
+                f"*Pre-race checklist:*\n{items}\n\n"
+                f"_Get everything ready today. You've got this._"
+            )
+            await app.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+
+# ── Sleep / recovery logging ──────────────────────────────────────────
+async def cb_recovery(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split("|")
+    rating = parts[1]
+    uid = parts[2] if len(parts) > 2 else ""
+
+    if rating == "skip":
+        await query.edit_message_text("Skipped.")
+        return
+
+    data = load_data()
+    data.setdefault("recovery", {})[uid] = {"rating": rating, "date": today_str()}
+    save_data(data)
+
+    msgs = {
+        "good": "Fresh legs logged ✅ — coach analysis will factor this in.",
+        "avg": "Average recovery logged — take the warm-up easy.",
+        "poor": "Fatigued noted ⚠️ — if the session feels wrong, cut it short."
+    }
+    await query.edit_message_text(msgs.get(rating, "Logged."))
+
+
 async def text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if text == "📅 This Week":
@@ -1509,6 +1679,7 @@ def main():
     app.add_handler(mileage_conv)
     app.add_handler(CallbackQueryHandler(cb_autogear, pattern=r"^autogear\|"))
     app.add_handler(CallbackQueryHandler(cb_race_remove, pattern=r"^race_remove\|"))
+    app.add_handler(CallbackQueryHandler(cb_recovery, pattern=r"^recovery\|"))
 
     app.add_handler(CallbackQueryHandler(cb_week, pattern=r"^week\|"))
     app.add_handler(CallbackQueryHandler(cb_toggle, pattern=r"^toggle\|"))
@@ -1519,6 +1690,12 @@ def main():
 
     app.add_handler(MessageHandler(filters.PHOTO, receive_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
+
+    # Scheduler for Monday briefing + race checklists
+    scheduler = AsyncIOScheduler(timezone=SGT)
+    scheduler.add_job(send_monday_briefing, "cron", day_of_week="mon", hour=7, minute=0, args=[app])
+    scheduler.add_job(check_and_send_race_checklists, "cron", hour=8, minute=0, args=[app])
+    scheduler.start()
 
     logger.info("Bot starting…")
     app.run_polling(drop_pending_updates=True)
