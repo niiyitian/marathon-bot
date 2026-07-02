@@ -595,7 +595,8 @@ async def receive_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             km = await extract_distance_from_image(image_bytes)
             if km > 0:
-                # Auto-log mileage for current week
+                # Reload data fresh before logging mileage
+                data = load_data()
                 log_mileage(data, current_week_num(), km)
                 save_data(data)
 
