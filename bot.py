@@ -1343,9 +1343,26 @@ async def cb_mileage_manual(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     wnum = current_week_num()
-    ctx.user_data["mileage_week"] = wnum
+
+    # Show week picker — current week + last 3 weeks
+    buttons = []
+    for w in range(max(1, wnum - 3), wnum + 1):
+        buttons.append([InlineKeyboardButton(f"Week {w}", callback_data=f"mileage_week|{w}")])
+
     await query.edit_message_text(
-        f"📊 Log km for Week {wnum}\n\nHow many km did you run? (e.g. `8.5`)\n\nSend /cancel to abort."
+        "📊 *Log km manually*\n\nWhich week?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+async def cb_mileage_week_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, wnum = query.data.split("|")
+    ctx.user_data["mileage_week"] = int(wnum)
+    await query.edit_message_text(
+        f"📊 Log km for *Week {wnum}*\n\nHow many km did you run? (e.g. `8.5`)\n\nSend /cancel to abort.",
+        parse_mode="Markdown"
     )
     return "MILEAGE_ENTER"
 
@@ -1467,7 +1484,10 @@ def main():
 
     # Mileage manual entry conversation
     mileage_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(cb_mileage_manual, pattern=r"^mileage_manual$")],
+        entry_points=[
+            CallbackQueryHandler(cb_mileage_manual, pattern=r"^mileage_manual$"),
+            CallbackQueryHandler(cb_mileage_week_pick, pattern=r"^mileage_week\|"),
+        ],
         states={
             "MILEAGE_ENTER": [MessageHandler(filters.TEXT & ~filters.COMMAND, mileage_enter)],
         },
