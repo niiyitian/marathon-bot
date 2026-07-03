@@ -581,18 +581,36 @@ async def receive_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             auto_complete_msg = ""
 
-    data.setdefault("logs", {})[uid] = {
-        "file_id": file_id,
+    data.setdefault("logs", {})
+    existing = data["logs"].get(uid, {})
+    # Support multiple images — store as list
+    file_ids = existing.get("file_ids", [])
+    if existing.get("file_id") and existing["file_id"] not in file_ids:
+        file_ids.append(existing["file_id"])  # migrate old single image
+    file_ids.append(file_id)
+
+    is_additional = uid in data["logs"]
+    data["logs"][uid] = {
+        "file_ids": file_ids,
+        "file_id": file_id,  # keep for backward compat
         "date": today_str(),
         "caption": caption
     }
     save_data(data)
     ctx.user_data.pop("upload_uid", None)
 
+    if is_additional:
+        added_msg = f"📎 *Additional image added* ({len(file_ids)} total for this session)\n\n🔍 Analysing..."
+    else:
+        added_msg = f"📎 Activity log saved for:\n*{name}*{auto_complete_msg}\n\n🔍 Analysing your run..."
+
     await update.message.reply_text(
-        f"📎 Activity log saved for:\n*{name}*{auto_complete_msg}\n\n🔍 Analysing your run...",
+        added_msg,
         parse_mode="Markdown",
-        reply_markup=main_menu_keyboard()
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("📷 Add another image", callback_data=f"upload_session|{uid}"),
+            InlineKeyboardButton("✅ Done", callback_data="upload_done")
+        ]])
     )
 
     # Download photo bytes once — use for both analysis and distance extraction
@@ -612,36 +630,42 @@ async def receive_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Photo analysis error: {e}")
 
-        # Extract distance and ask which shoe + auto-log mileage
-        try:
-            km = await extract_distance_from_image(image_bytes)
-            if km > 0:
-                # Reload data fresh before logging mileage
-                data = load_data()
-                log_mileage(data, current_week_num(), km)
-                save_data(data)
+        # Extract distance and ask which shoe + auto-log mileage (only on first image)
+        if not is_additional:
+            try:
+                km = await extract_distance_from_image(image_bytes)
+                if km > 0:
+                    data = load_data()
+                    log_mileage(data, current_week_num(), km)
+                    save_data(data)
 
-                ctx.user_data["auto_gear_km"] = km
-                shoes = get_shoes(data)
-                buttons = []
-                for sid, shoe in shoes.items():
-                    buttons.append([InlineKeyboardButton(
-                        f"{shoe['name']} ({shoe['km']:.0f}km)",
-                        callback_data=f"autogear|{sid}|{km}"
-                    )])
-                buttons.append([InlineKeyboardButton("⬜ Skip gear tracking", callback_data="autogear|skip|0")])
-                await update.message.reply_text(
-                    f"📊 *{km:.1f}km logged to this week's mileage.*\n\n👟 *Which shoes did you wear?*",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup(buttons)
-                )
-        except Exception as e:
-            logger.error(f"Gear auto-log error: {e}")
+                    ctx.user_data["auto_gear_km"] = km
+                    shoes = get_shoes(data)
+                    buttons = []
+                    for sid, shoe in shoes.items():
+                        buttons.append([InlineKeyboardButton(
+                            f"{shoe['name']} ({shoe['km']:.0f}km)",
+                            callback_data=f"autogear|{sid}|{km}"
+                        )])
+                    buttons.append([InlineKeyboardButton("⬜ Skip gear tracking", callback_data="autogear|skip|0")])
+                    await update.message.reply_text(
+                        f"📊 *{km:.1f}km logged to this week's mileage.*\n\n👟 *Which shoes did you wear?*",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup(buttons)
+                    )
+            except Exception as e:
+                logger.error(f"Gear auto-log error: {e}")
     else:
         await update.message.reply_text(
             "💡 _Tip: Set ANTHROPIC\\_API\\_KEY when starting the bot to get AI run analysis!_",
             parse_mode="Markdown"
         )
+
+
+async def cb_upload_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("✅ All images saved!", reply_markup=None)
 
 
 async def cb_autogear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1723,6 +1747,7 @@ def main():
     app.add_handler(race_conv)
     app.add_handler(mileage_conv)
     app.add_handler(CallbackQueryHandler(cb_autogear, pattern=r"^autogear\|"))
+    app.add_handler(CallbackQueryHandler(cb_upload_done, pattern=r"^upload_done$"))
     app.add_handler(CallbackQueryHandler(cb_race_remove, pattern=r"^race_remove\|"))
     app.add_handler(CallbackQueryHandler(cb_recovery, pattern=r"^recovery\|"))
     app.add_handler(CallbackQueryHandler(cb_sleep_log, pattern=r"^sleep\|"))
