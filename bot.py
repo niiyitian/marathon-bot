@@ -210,7 +210,8 @@ def main_menu_keyboard():
             ["📊 My Progress", "🔮 Predictions"],
             ["📋 Week Summary", "👟 Gear Tracker"],
             ["🏁 Race Debrief", "🗓 Race Manager"],
-            ["📈 Mileage", "🆘 Help"],
+            ["📈 Mileage", "💬 Ask Coach"],
+            ["🆘 Help"],
         ],
         resize_keyboard=True
     )
@@ -1688,6 +1689,8 @@ async def text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_race_manager(update, ctx)
     elif text == "📈 Mileage":
         await show_mileage(update, ctx)
+    elif text == "💬 Ask Coach":
+        return await ask_coach_start(update, ctx)
     elif text == "🆘 Help":
         await show_help(update, ctx)
     else:
@@ -1695,6 +1698,67 @@ async def text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "Use the menu buttons below, or /help for commands.",
             reply_markup=main_menu_keyboard()
         )
+
+ASK_COACH_STATE = 40
+
+async def ask_coach_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "💬 *Ask Coach*\n\n"
+        "Ask anything about your training — pacing, nutrition, race strategy, recovery, gear.\n\n"
+        "Type your question:",
+        parse_mode="Markdown"
+    )
+    return ASK_COACH_STATE
+
+async def ask_coach_answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    question = update.message.text.strip()
+    if not ANTHROPIC_KEY:
+        await update.message.reply_text("Coach unavailable — ANTHROPIC_API_KEY not set.", reply_markup=main_menu_keyboard())
+        return ConversationHandler.END
+
+    await update.message.reply_text("🤔 Thinking...")
+
+    data = load_data()
+    wnum = current_week_num()
+    completed_count = len(data.get("completed", {}))
+    (hm_h, hm_m), (fm_h, fm_m), weeks = predict_race_times(data)
+
+    context = (
+        f"You are an experienced marathon running coach advising Yitian, a female runner based in Singapore.\n"
+        f"Current training: Week {wnum}/24 of BYD Marathon plan (Dec 6 2026, sub-5hr target).\n"
+        f"Sessions completed: {completed_count}. Predicted HM: {hm_h}:{hm_m:02d}, FM: {fm_h}:{fm_m:02d}.\n"
+        f"Strava PBs: 5K 30:23, 10K 1:05:48, HM 2:27:45. Max HR: 184bpm. Avg sleep score: 68.\n"
+        f"Races: Sep 27 HM (target 2:15), Nov 1 HM (marathon effort), Nov 26 Hyrox, Dec 6 Full Marathon.\n"
+        f"Trains in Singapore heat (28-34°C, 70-90% humidity) — HR runs 5-10bpm higher than cool conditions.\n"
+        f"Shoes: ASICS Superblast 2 (training), On CloudMonster Hyper (race/tempo), Saucony Endorphin Speed (race), Adidas Evo SL (race).\n\n"
+        f"Answer directly and concisely. Be specific with numbers. "
+        f"Sound like a coach — firm, practical, no fluff. 3-5 sentences max unless a detailed breakdown is needed."
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                json={
+                    "model": "claude-sonnet-4-6",
+                    "max_tokens": 400,
+                    "system": context,
+                    "messages": [{"role": "user", "content": question}]
+                }
+            )
+        answer = resp.json()["content"][0]["text"]
+        await update.message.reply_text(f"💬 *Coach:*\n\n{answer}", parse_mode="Markdown", reply_markup=main_menu_keyboard())
+    except Exception as e:
+        logger.error(f"Ask coach error: {e}")
+        await update.message.reply_text("Something went wrong. Try again.", reply_markup=main_menu_keyboard())
+
+    return ConversationHandler.END
+
+async def ask_coach_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Cancelled.", reply_markup=main_menu_keyboard())
+    return ConversationHandler.END
+
 
 # ── Build & run ──────────────────────────────────────────────────────
 def main():
@@ -1770,6 +1834,15 @@ def main():
         per_message=False,
     )
 
+    ask_coach_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^💬 Ask Coach$"), ask_coach_start)],
+        states={
+            ASK_COACH_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_coach_answer)],
+        },
+        fallbacks=[CommandHandler("cancel", ask_coach_cancel)],
+        per_message=False,
+    )
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("week", show_this_week))
     app.add_handler(CommandHandler("plan", show_full_plan))
@@ -1781,6 +1854,7 @@ def main():
     app.add_handler(debrief_conv)
     app.add_handler(race_conv)
     app.add_handler(mileage_conv)
+    app.add_handler(ask_coach_conv)
     app.add_handler(CallbackQueryHandler(cb_autogear, pattern=r"^autogear\|"))
     app.add_handler(CallbackQueryHandler(cb_upload_done, pattern=r"^upload_done$"))
     app.add_handler(CallbackQueryHandler(cb_race_remove, pattern=r"^race_remove\|"))
