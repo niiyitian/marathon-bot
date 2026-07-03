@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("BOT_TOKEN", "")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+GMAPS_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
 DATA_DIR = Path("/app/data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DATA_FILE = DATA_DIR / "data.json"
@@ -211,7 +212,7 @@ def main_menu_keyboard():
             ["📋 Week Summary", "👟 Gear Tracker"],
             ["🏁 Race Debrief", "🗓 Race Manager"],
             ["📈 Mileage", "💬 Ask Coach"],
-            ["🆘 Help"],
+            ["🗺 Route Planner", "🆘 Help"],
         ],
         resize_keyboard=True
     )
@@ -1691,6 +1692,8 @@ async def text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_mileage(update, ctx)
     elif text == "💬 Ask Coach":
         return await ask_coach_start(update, ctx)
+    elif text == "🗺 Route Planner":
+        return await route_planner_start(update, ctx)
     elif text == "🆘 Help":
         await show_help(update, ctx)
     else:
@@ -1757,6 +1760,198 @@ async def ask_coach_answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def ask_coach_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Cancelled.", reply_markup=main_menu_keyboard())
+    return ConversationHandler.END
+
+
+ROUTE_START, ROUTE_END, ROUTE_DISTANCE = range(50, 53)
+
+def build_gpx(route_name: str, points: list) -> str:
+    """Build a GPX file from a list of (lat, lon) points."""
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<gpx version="1.1" creator="YT Running Bot" xmlns="http://www.topografix.com/GPX/1/1">',
+        f'  <trk><name>{route_name}</name><trkseg>',
+    ]
+    for lat, lon in points:
+        lines.append(f'    <trkpt lat="{lat}" lon="{lon}"></trkpt>')
+    lines += ['  </trkseg></trk>', '</gpx>']
+    return "\n".join(lines)
+
+async def get_route(origin: str, destination: str, target_km: float) -> dict:
+    """Call Google Maps Directions API and return route info."""
+    if not GMAPS_KEY:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                "https://maps.googleapis.com/maps/api/directions/json",
+                params={
+                    "origin": origin,
+                    "destination": destination if destination else origin,
+                    "mode": "walking",
+                    "key": GMAPS_KEY,
+                    "region": "sg",
+                }
+            )
+        data = resp.json()
+        if data["status"] != "OK":
+            return {"error": data.get("status", "Unknown error")}
+
+        route = data["routes"][0]
+        leg = route["legs"][0]
+        distance_m = leg["distance"]["value"]
+        duration_s = leg["duration"]["value"]
+
+        # Extract polyline points
+        import base64 as b64
+        def decode_polyline(encoded):
+            points = []
+            index = 0
+            lat = 0
+            lng = 0
+            while index < len(encoded):
+                result = 0
+                shift = 0
+                while True:
+                    b = ord(encoded[index]) - 63
+                    index += 1
+                    result |= (b & 0x1f) << shift
+                    shift += 5
+                    if b < 0x20:
+                        break
+                dlat = ~(result >> 1) if result & 1 else result >> 1
+                lat += dlat
+                result = 0
+                shift = 0
+                while True:
+                    b = ord(encoded[index]) - 63
+                    index += 1
+                    result |= (b & 0x1f) << shift
+                    shift += 5
+                    if b < 0x20:
+                        break
+                dlng = ~(result >> 1) if result & 1 else result >> 1
+                lng += dlng
+                points.append((lat / 1e5, lng / 1e5))
+            return points
+
+        points = decode_polyline(route["overview_polyline"]["points"])
+
+        # Build step-by-step directions
+        steps = []
+        for step in leg["steps"]:
+            instruction = re.sub(r'<[^>]+>', '', step["html_instructions"])
+            dist = step["distance"]["text"]
+            steps.append(f"• {instruction} ({dist})")
+
+        return {
+            "distance_km": distance_m / 1000,
+            "duration_min": duration_s // 60,
+            "points": points,
+            "steps": steps[:10],  # first 10 steps
+            "start_address": leg["start_address"],
+            "end_address": leg["end_address"],
+        }
+    except Exception as e:
+        logger.error(f"Google Maps error: {e}")
+        return {"error": str(e)}
+
+async def route_planner_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🗺 *Route Planner*\n\n"
+        "I'll plan a running route and give you a GPX file to import into Garmin.\n\n"
+        "📍 What's your *starting point*?\n"
+        "_(e.g. `160 Tampines Street 12` or `Bedok MRT`)_",
+        parse_mode="Markdown"
+    )
+    return ROUTE_START
+
+async def route_get_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["route_start"] = update.message.text.strip() + ", Singapore"
+    await update.message.reply_text(
+        "🏁 What's your *end point*?\n\n"
+        "_(Send `-` to make it a loop back to start)_",
+        parse_mode="Markdown"
+    )
+    return ROUTE_END
+
+async def route_get_end(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    end = update.message.text.strip()
+    if end == "-":
+        ctx.user_data["route_end"] = ctx.user_data["route_start"]
+    else:
+        ctx.user_data["route_end"] = end + ", Singapore"
+    await update.message.reply_text(
+        "📏 How many *km* do you want to run?\n_(e.g. `14`)_",
+        parse_mode="Markdown"
+    )
+    return ROUTE_DISTANCE
+
+async def route_get_distance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        km = float(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("Please send a number like `14`", parse_mode="Markdown")
+        return ROUTE_DISTANCE
+
+    start = ctx.user_data.get("route_start", "")
+    end = ctx.user_data.get("route_end", "")
+
+    await update.message.reply_text("🗺 Planning your route...")
+
+    if not GMAPS_KEY:
+        await update.message.reply_text(
+            "Google Maps API key not set. Add `GOOGLE_MAPS_API_KEY` to Railway variables.",
+            reply_markup=main_menu_keyboard()
+        )
+        return ConversationHandler.END
+
+    result = await get_route(start, end, km)
+
+    if not result or "error" in result:
+        # Fallback to AI suggestion
+        await update.message.reply_text(
+            f"⚠️ Couldn't get a live route (error: {result.get('error', 'unknown')}).\n\n"
+            f"Make sure the Directions API is enabled in Google Cloud Console → APIs & Services → Library → search 'Directions API' → Enable.",
+            reply_markup=main_menu_keyboard()
+        )
+        return ConversationHandler.END
+
+    actual_km = result["distance_km"]
+    duration = result["duration_min"]
+    steps = "\n".join(result["steps"])
+
+    # Build GPX
+    gpx_content = build_gpx(f"Running route {km}km", result["points"])
+    gpx_path = DATA_DIR / "route.gpx"
+    gpx_path.write_text(gpx_content)
+
+    # Send summary
+    await update.message.reply_text(
+        f"🗺 *Your {km}km Running Route*\n\n"
+        f"📍 From: {result['start_address'][:50]}\n"
+        f"🏁 To: {result['end_address'][:50]}\n"
+        f"📏 Distance: {actual_km:.1f}km\n"
+        f"⏱ Est. time @ 7:30/km: ~{int(km * 7.5)}min\n\n"
+        f"*Directions:*\n{steps}\n\n"
+        f"_GPX file coming next — import into Garmin Connect_",
+        parse_mode="Markdown",
+        reply_markup=main_menu_keyboard()
+    )
+
+    # Send GPX file
+    await update.message.reply_document(
+        document=open(gpx_path, "rb"),
+        filename=f"run_{int(km)}km.gpx",
+        caption="📎 Import this into Garmin Connect → Courses → Import"
+    )
+
+    ctx.user_data.pop("route_start", None)
+    ctx.user_data.pop("route_end", None)
+    return ConversationHandler.END
+
+async def route_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Route planning cancelled.", reply_markup=main_menu_keyboard())
     return ConversationHandler.END
 
 
@@ -1843,6 +2038,17 @@ def main():
         per_message=False,
     )
 
+    route_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^🗺 Route Planner$"), route_planner_start)],
+        states={
+            ROUTE_START: [MessageHandler(filters.TEXT & ~filters.COMMAND, route_get_start)],
+            ROUTE_END: [MessageHandler(filters.TEXT & ~filters.COMMAND, route_get_end)],
+            ROUTE_DISTANCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, route_get_distance)],
+        },
+        fallbacks=[CommandHandler("cancel", route_cancel)],
+        per_message=False,
+    )
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("week", show_this_week))
     app.add_handler(CommandHandler("plan", show_full_plan))
@@ -1855,6 +2061,7 @@ def main():
     app.add_handler(race_conv)
     app.add_handler(mileage_conv)
     app.add_handler(ask_coach_conv)
+    app.add_handler(route_conv)
     app.add_handler(CallbackQueryHandler(cb_autogear, pattern=r"^autogear\|"))
     app.add_handler(CallbackQueryHandler(cb_upload_done, pattern=r"^upload_done$"))
     app.add_handler(CallbackQueryHandler(cb_race_remove, pattern=r"^race_remove\|"))
