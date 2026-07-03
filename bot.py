@@ -30,7 +30,7 @@ DATA_FILE = DATA_DIR / "data.json"
 CHAT_ID_FILE = DATA_DIR / "chat_id.txt"
 
 # ── Conversation states ──────────────────────────────────────────────
-EDIT_CHOOSE_SESSION, EDIT_ENTER_TEXT = range(2)
+EDIT_CHOOSE_SESSION, EDIT_ENTER_TEXT, EDIT_ENTER_NOTES = range(3)
 LOG_CHOOSE_SESSION, LOG_UPLOAD = range(10, 12)
 
 # ── Training plan (parsed from .ics) ────────────────────────────────
@@ -742,12 +742,13 @@ async def cb_edit_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["edit_uid"] = uid
     data = load_data()
     s = get_session(uid)
-    current = data.get("edits", {}).get(uid, {}).get("summary", s[2] if s else "")
+    current_title = data.get("edits", {}).get(uid, {}).get("summary", s[2] if s else "")
+    current_notes = data.get("edits", {}).get(uid, {}).get("desc", s[3] if s else "")
 
     await query.edit_message_text(
         f"✏️ Editing: *{s[2] if s else uid}*\n\n"
-        f"Current description:\n`{current}`\n\n"
-        f"Send the new session description (e.g. `8×400m @ 5:30/km`):\n\n"
+        f"Current title:\n`{current_title}`\n\n"
+        f"Send the new session title (e.g. `7×800m @ 5:50/km`):\n\n"
         f"Or send /cancel to abort.",
         parse_mode="Markdown"
     )
@@ -759,18 +760,46 @@ async def edit_receive_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Something went wrong. Please try again.")
         return ConversationHandler.END
 
-    new_text = update.message.text.strip()
+    ctx.user_data["edit_new_title"] = update.message.text.strip()
     data = load_data()
-    data.setdefault("edits", {}).setdefault(uid, {})["summary"] = new_text
+    s = get_session(uid)
+    current_notes = data.get("edits", {}).get(uid, {}).get("desc", s[3] if s else "")
+
+    await update.message.reply_text(
+        f"Now send the coach notes / description for this session.\n\n"
+        f"Current: _{current_notes if current_notes else 'none'}_\n\n"
+        f"Send `-` to keep existing notes, or type new ones.",
+        parse_mode="Markdown"
+    )
+    return EDIT_ENTER_NOTES
+
+async def edit_receive_notes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = ctx.user_data.get("edit_uid")
+    new_title = ctx.user_data.get("edit_new_title", "")
+    new_notes = update.message.text.strip()
+
+    data = load_data()
+    s = get_session(uid)
+    data.setdefault("edits", {}).setdefault(uid, {})["summary"] = new_title
+
+    if new_notes != "-":
+        data["edits"][uid]["desc"] = new_notes
+    else:
+        # Keep existing
+        existing = data["edits"][uid].get("desc", s[3] if s else "")
+        data["edits"][uid]["desc"] = existing
+
     save_data(data)
 
-    s = get_session(uid)
     await update.message.reply_text(
-        f"✅ Updated!\n\n*{s[1] if s else uid}* is now:\n_{new_text}_",
+        f"✅ Updated!\n\n"
+        f"*Title:* {new_title}\n"
+        f"*Notes:* _{data['edits'][uid].get('desc', '') or 'none'}_",
         parse_mode="Markdown",
         reply_markup=main_menu_keyboard()
     )
     ctx.user_data.pop("edit_uid", None)
+    ctx.user_data.pop("edit_new_title", None)
     return ConversationHandler.END
 
 async def edit_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1678,7 +1707,11 @@ def main():
             EDIT_ENTER_TEXT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, edit_receive_text),
                 CommandHandler("cancel", edit_cancel),
-            ]
+            ],
+            EDIT_ENTER_NOTES: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_receive_notes),
+                CommandHandler("cancel", edit_cancel),
+            ],
         },
         fallbacks=[CommandHandler("cancel", edit_cancel)],
         per_message=False,
