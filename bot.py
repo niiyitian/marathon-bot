@@ -24,7 +24,10 @@ logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("BOT_TOKEN", "")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-DATA_FILE = Path("data.json")
+DATA_DIR = Path("/app/data")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+DATA_FILE = DATA_DIR / "data.json"
+CHAT_ID_FILE = DATA_DIR / "chat_id.txt"
 
 # ── Conversation states ──────────────────────────────────────────────
 EDIT_CHOOSE_SESSION, EDIT_ENTER_TEXT = range(2)
@@ -1436,7 +1439,6 @@ async def mileage_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 SGT = pytz.timezone("Asia/Singapore")
-CHAT_ID_FILE = Path("chat_id.txt")
 
 def save_chat_id(chat_id: int):
     CHAT_ID_FILE.write_text(str(chat_id))
