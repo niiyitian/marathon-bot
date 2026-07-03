@@ -1563,6 +1563,8 @@ async def cb_sleep_log(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "poor": "Noted ⚠️ — below baseline. Complete the session but reduce intensity if HR climbs too high early."
     }
     await query.edit_message_text(responses[rating])
+
+async def check_and_send_race_checklists(app):
     import datetime as dt
     target = (date.today() + dt.timedelta(days=3)).isoformat()
     for uid, info in RACE_CHECKLISTS.items():
