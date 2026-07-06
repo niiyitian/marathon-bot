@@ -148,7 +148,7 @@ TRAINING_PLAN = [
   # W24
   ("w24_tue", "2026-12-01", "W24 · [Easy] Easy 3km shakeout @ 7:30/km", "", False, False),
   ("w24_fri", "2026-12-05", "W24 · [🏁 PACE] PACING DUTY: Dec 5 HM @ 7:50/km", "Walk uphills. Eat 2 gels. Refuel HUGE after finishing. Sleep by 9pm. Big day tomorrow.", False, False),
-  ("w24_sun", "2026-12-06", "W24 · [🏁 RACE DAY] BYD Full Marathon — Target sub-5hr", "Start @ 7:15/km for first 10km. Settle into 7:05 from 10–30km. Hold on. You've done the work.", False, False),
+  ("w24_sun", "2026-12-06", "W24 · [🏁 RACE DAY] BYD Full Marathon — Target sub-4:45", "Start @ 6:55/km for first 10km. Settle into 6:45 from 10–30km. Hold on. You've done the work.", False, False),
 ]
 
 # ── Data helpers ─────────────────────────────────────────────────────
@@ -186,10 +186,16 @@ def current_week_num():
 def session_display(s, data: dict) -> str:
     uid, dt, summary, desc, is_thu, is_tue = s
     overrides = data.get("edits", {})
-    display_summary = overrides.get(uid, {}).get("summary", summary)
+    raw_summary = overrides.get(uid, {}).get("summary", summary)
     display_desc = overrides.get(uid, {}).get("desc", desc)
     done = uid in data.get("completed", {})
     has_log = uid in data.get("logs", {})
+
+    # Strip [Tag] from display only if not a custom edit
+    if uid not in overrides:
+        display_summary = re.sub(r'\s*\[.*?\]\s*', ' ', raw_summary).strip()
+    else:
+        display_summary = raw_summary
 
     status = "✅" if done else "⬜"
     log_icon = " 📎" if has_log else ""
@@ -222,7 +228,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     save_chat_id(update.effective_chat.id)
     await update.message.reply_text(
         "👟 *BYD Marathon 2026 Training Bot*\n\n"
-        "I'll help you track your 24-week plan to sub-5hr on Dec 6 🏅\n\n"
+        "I'll help you track your 24-week plan to sub-4:45 on Dec 6 🏅\n\n"
         "Use the menu below to navigate. Good luck with the training!",
         parse_mode="Markdown",
         reply_markup=main_menu_keyboard()
@@ -883,10 +889,10 @@ async def show_predictions(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     hm_gap = hm_actual_min - hm_target_min
     hm_gap_text = f"{abs(hm_gap)} min {'ahead of' if hm_gap < 0 else 'behind'} 2:15 target" if hm_gap != 0 else "exactly on 2:15 target"
 
-    fm_target_min = 300  # 5:00
+    fm_target_min = 285  # 4:45
     fm_actual_min = fm_h * 60 + fm_m
     fm_gap = fm_actual_min - fm_target_min
-    fm_gap_text = f"{abs(fm_gap)} min {'ahead of' if fm_gap < 0 else 'behind'} sub-5hr target" if fm_gap != 0 else "exactly on sub-5hr target"
+    fm_gap_text = f"{abs(fm_gap)} min {'ahead of' if fm_gap < 0 else 'behind'} sub-4:45 target" if fm_gap != 0 else "exactly on sub-4:45 target"
 
     text = (
         f"🔮 *Race Time Predictions*\n"
@@ -1497,7 +1503,10 @@ async def send_monday_briefing(app):
     session_lines = ""
     for s in sessions:
         done = "✅" if s[0] in completed else "⬜"
-        session_lines += f"{done} {s[1]}: {s[2][:55]}\n"
+        # Use edited title if available, strip [Tag] prefix for cleaner display
+        display = data.get("edits", {}).get(s[0], {}).get("summary", s[2])
+        display = re.sub(r'\[.*?\]\s*', '', display).strip()
+        session_lines += f"{done} {s[1]}: {display[:55]}\n"
 
     km_target = WEEKLY_KM_TARGETS.get(wnum, 30)
     last_week_km = data.get("mileage", {}).get(str(wnum - 1), 0.0)
@@ -1728,7 +1737,7 @@ async def ask_coach_answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     context = (
         f"You are an experienced marathon running coach advising Yitian, a female runner based in Singapore.\n"
-        f"Current training: Week {wnum}/24 of BYD Marathon plan (Dec 6 2026, sub-5hr target).\n"
+        f"Current training: Week {wnum}/24 of BYD Marathon plan (Dec 6 2026, sub-4:45 target).\n"
         f"Sessions completed: {completed_count}. Predicted HM: {hm_h}:{hm_m:02d}, FM: {fm_h}:{fm_m:02d}.\n"
         f"Strava PBs: 5K 30:23, 10K 1:05:48, HM 2:27:45. Max HR: 184bpm. Avg sleep score: 68.\n"
         f"Races: Sep 27 HM (target 2:15), Nov 1 HM (marathon effort), Nov 26 Hyrox, Dec 6 Full Marathon.\n"
