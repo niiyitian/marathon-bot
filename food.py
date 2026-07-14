@@ -1,24 +1,31 @@
 """
-food.py — Food & Nutrition logging add-on for @YitianMarathonBot
+food.py — Food, Nutrition & Exercise add-on for @YitianMarathonBot
 
 Self-contained module. Reuses the SAME data.json store as bot.py (safe
-read-merge-write on the "food_logs" key only, so it won't clobber the
-training data bot.py owns).
+read-merge-write, only touching the "food_logs", "exercise_extra", and
+"profile" keys — never touches bot.py's own data).
 
 ── Wiring it into bot.py ──────────────────────────────────────────────
 1. At the top of bot.py, add:
        import food
 
-2. In main_menu_keyboard(), add a new row, e.g.:
+2. In main_menu_keyboard(), add new rows, e.g.:
        ["🍽️ Log Food", "📊 Nutrition"],
+       ["🏋️ Extra Exercise", "⚖️ My Profile"],
 
 3. In text_router(), add:
        elif text == "🍽️ Log Food":
            return await food.food_menu(update, ctx)
        elif text == "📊 Nutrition":
            return await food.show_today(update, ctx)
+       elif text == "🏋️ Extra Exercise":
+           return await food.exercise_menu(update, ctx)
+       elif text == "⚖️ My Profile":
+           return await food.profile_menu(update, ctx)
 
-4. In main(), before app.run_polling():
+4. In main(), BEFORE the generic photo/text catch-all handlers
+   (MessageHandler(filters.PHOTO, ...) / MessageHandler(filters.TEXT, ...))
+   — same slot as your other ConversationHandlers:
        food.register(app)
 
 That's it — no changes needed to bot.py's data model or existing handlers.
@@ -46,108 +53,11 @@ ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 DATA_DIR = Path("/app/data")
 DATA_FILE = DATA_DIR / "data.json"
 
-# ── Targets — from the TDEE/deficit calc for 63kg / 164cm / 25F.
-#    REST_DAY_MAINTENANCE is the ~1780kcal baseline (BMR × activity factor,
-#    no training). The actual daily target is computed dynamically in
-#    compute_daily_target() below, using whatever's scheduled on that date
-#    in bot.py's TRAINING_PLAN — deficit shrinks/vanishes on hard days,
-#    stays fuller on rest days it's smaller so the WEEKLY total nets out
-#    to a sustainable deficit rather than flat-cutting every day equally. ──
-REST_DAY_MAINTENANCE = 1780
-NORMAL_DAY_DEFICIT = (250, 350)   # (tighter, looser) kcal below maintenance
-RUN_KCAL_PER_KM = 58              # rough burn estimate at ~63kg
-HYROX_KCAL = 500
-DAILY_PROTEIN_TARGET_G = 100  # ~1.6g/kg bodyweight, reasonable for a runner
-
-
-# Tag priority (most demanding first) — used when a day has multiple sessions
-_TAG_PRIORITY = ["RACE", "PACE", "HYROX", "LONG RUN", "MP RUN", "TEMPO", "TRACK", "EASY"]
-
-
-def _today_sessions() -> list:
-    """Pull today's scheduled session(s) from bot.py's TRAINING_PLAN, if any.
-    Returns list of (summary, desc). Lazy import avoids a circular import
-    (bot.py imports food.py at load time)."""
-    try:
-        import bot as _bot
-    except ImportError:
-        return []
-    today = date.today().isoformat()
-    return [(s[2], s[3]) for s in _bot.TRAINING_PLAN if s[1] == today]
-
-
-def compute_daily_target() -> tuple:
-    """Returns (low, high, label) for today's calorie target, adjusted for
-    whatever's on the training plan today, PLUS any extra gym/strength/cardio
-    logged manually via the Extra Exercise buttons (not in TRAINING_PLAN).
-    Parses the [Tag] bracket from each session's SUMMARY only (never the
-    free-text coach notes, which can contain misleading substrings like
-    'skip club tempo')."""
-    today = date.today().isoformat()
-    extra_burn = _get_extra_exercise(today)
-    sessions = _today_sessions()
-
-    if not sessions:
-        lo_def, hi_def = NORMAL_DAY_DEFICIT
-        lo = REST_DAY_MAINTENANCE - hi_def + extra_burn
-        hi = REST_DAY_MAINTENANCE - lo_def + extra_burn
-        label = "Rest day" + (" + gym" if extra_burn else "")
-        return _round25(lo), _round25(hi), label
-
-    burn = 0.0
-    tags_found = []
-    total_km = 0.0
-
-    for summary, desc in sessions:
-        tag_match = re.search(r'\[(.*?)\]', summary)
-        tag = tag_match.group(1).upper() if tag_match else ""
-        tags_found.append(tag)
-
-        upper_summary = summary.upper()
-        if "HYROX" in tag or "HYROX" in upper_summary:
-            burn += HYROX_KCAL
-
-        km_match = re.search(r'(\d+(?:\.\d+)?)\s*km', summary)  # summary first
-        if not km_match:
-            km_match = re.search(r'(\d+(?:\.\d+)?)\s*km', desc)  # fallback
-        if km_match:
-            dist = float(km_match.group(1))
-            total_km += dist
-            burn += dist * RUN_KCAL_PER_KM
-
-    burn += extra_burn
-    extra_suffix = " + gym" if extra_burn else ""
-    upper_all = " ".join(tags_found) + " " + " ".join(s for s, _ in sessions).upper()
-
-    # No-deficit days: race day, pacing duty — full maintenance + burn
-    if "RACE" in upper_all or "PACE" in upper_all:
-        label = ("🏁 Race/pace day — fuel fully, no deficit" if "RACE" in upper_all else "Pacing duty — fuel fully, no deficit") + extra_suffix
-        target = REST_DAY_MAINTENANCE + burn
-        return _round25(target - 50), _round25(target + 100), label
-
-    # Pick the most demanding tag present, for the label
-    label = "Training day"
-    for candidate in _TAG_PRIORITY:
-        if any(candidate in t for t in tags_found):
-            pretty = candidate.lower().capitalize()
-            label = f"{pretty} day ({total_km:.0f}km)" if total_km and candidate in ("LONG RUN", "EASY") else f"{pretty} day"
-            break
-    if "HYROX" in upper_all:
-        label = "Hyrox day" + (f" + {total_km:.0f}km" if total_km else "")
-    label += extra_suffix
-
-    lo_def, hi_def = NORMAL_DAY_DEFICIT
-    lo = REST_DAY_MAINTENANCE - hi_def + burn
-    hi = REST_DAY_MAINTENANCE - lo_def + burn
-    return _round25(lo), _round25(hi), label
-
-
-def _round25(n: float) -> int:
-    return int(round(n / 25) * 25)
-
 # ── Conversation states ──────────────────────────────────────────────
 FOOD_AWAIT_INPUT = 300
 FOOD_AWAIT_EDIT = 301
+PROFILE_AWAIT_WEIGHT = 302
+PROFILE_AWAIT_FULL = 303
 
 
 # ── Shared-file data helpers (safe merge — never touches other keys) ──
@@ -172,29 +82,6 @@ def _logs_for_day(day: str) -> list:
     return [l for l in data.get("food_logs", []) if l.get("date") == day]
 
 
-# ── Extra exercise (gym/strength/cardio not in TRAINING_PLAN) ─────────
-EXTRA_EXERCISE_KCAL = {"light": 150, "moderate": 300, "hard": 450}
-EXTRA_EXERCISE_LABEL = {"light": "light session (~30min)", "moderate": "moderate session (~45-60min)", "hard": "hard/long session (~60-90min)"}
-
-
-def _add_extra_exercise(day: str, kcal: int):
-    data = _load()
-    data.setdefault("exercise_extra", {})
-    data["exercise_extra"][day] = data["exercise_extra"].get(day, 0) + kcal
-    _save(data)
-
-
-def _get_extra_exercise(day: str) -> int:
-    data = _load()
-    return data.get("exercise_extra", {}).get(day, 0)
-
-
-def _reset_extra_exercise(day: str):
-    data = _load()
-    data.setdefault("exercise_extra", {})[day] = 0
-    _save(data)
-
-
 def _totals(logs: list) -> dict:
     t = {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}
     for l in logs:
@@ -203,6 +90,177 @@ def _totals(logs: list) -> dict:
         t["carbs"] += l.get("carbs", 0) or 0
         t["fat"] += l.get("fat", 0) or 0
     return t
+
+
+# ── Profile — feeds the BMR/maintenance calc, so targets stay accurate ──
+# Seeded from the TDEE conversation (63kg/164cm/25/F). Update via the
+# "⚖️ My Profile" menu whenever weight changes rather than editing this.
+_DEFAULT_PROFILE = {"weight_kg": 63.0, "height_cm": 164.0, "age": 25, "sex": "F"}
+_REFERENCE_WEIGHT_KG = 63.0  # the weight the flat kcal tables below are calibrated at
+
+
+def _get_profile() -> dict:
+    data = _load()
+    return {**_DEFAULT_PROFILE, **data.get("profile", {})}
+
+
+def _save_profile(updates: dict):
+    data = _load()
+    profile = {**_DEFAULT_PROFILE, **data.get("profile", {})}
+    profile.update(updates)
+    data["profile"] = profile
+    _save(data)
+
+
+def _bmr(p: dict) -> float:
+    """Mifflin-St Jeor."""
+    base = 10 * p["weight_kg"] + 6.25 * p["height_cm"] - 5 * p["age"]
+    return base + 5 if p["sex"].upper().startswith("M") else base - 161
+
+
+def _rest_day_maintenance() -> float:
+    """BMR × activity factor (1.3, desk-based day, no training)."""
+    return _bmr(_get_profile()) * 1.3
+
+
+def _run_kcal_per_km() -> float:
+    """~0.92 kcal/kg/km running economy estimate, scaled to current weight."""
+    return _get_profile()["weight_kg"] * 0.92
+
+
+def _weight_scale() -> float:
+    return _get_profile()["weight_kg"] / _REFERENCE_WEIGHT_KG
+
+
+# ── Targets ──────────────────────────────────────────────────────────
+NORMAL_DAY_DEFICIT = (250, 350)   # (tighter, looser) kcal below maintenance
+HYROX_KCAL_BASE = 500             # at reference weight, scaled by _weight_scale()
+DAILY_PROTEIN_TARGET_G = 100      # ~1.6g/kg bodyweight, reasonable for a runner
+
+# Tag priority (most demanding first) — used when a day has multiple sessions
+_TAG_PRIORITY = ["RACE", "PACE", "HYROX", "LONG RUN", "MP RUN", "TEMPO", "TRACK", "EASY"]
+
+
+def _today_sessions() -> list:
+    """Pull today's scheduled session(s) from bot.py's TRAINING_PLAN, if any.
+    Returns list of (summary, desc). Lazy import avoids a circular import
+    (bot.py imports food.py at load time)."""
+    try:
+        import bot as _bot
+    except ImportError:
+        return []
+    today = date.today().isoformat()
+    return [(s[2], s[3]) for s in _bot.TRAINING_PLAN if s[1] == today]
+
+
+def compute_daily_target() -> tuple:
+    """Returns (low, high, label) for today's calorie target: rest-day
+    maintenance (from your CURRENT profile) ± deficit, adjusted for whatever's
+    on the training plan today, PLUS any extra gym/cardio/strength logged via
+    the Extra Exercise menu. Parses the [Tag] bracket from each session's
+    SUMMARY only (never the free-text coach notes, which can contain
+    misleading substrings like 'skip club tempo')."""
+    today = date.today().isoformat()
+    maintenance = _rest_day_maintenance()
+    run_kcal_per_km = _run_kcal_per_km()
+    hyrox_kcal = HYROX_KCAL_BASE * _weight_scale()
+    extra_burn = _get_extra_exercise_total(today)
+    sessions = _today_sessions()
+
+    if not sessions:
+        lo_def, hi_def = NORMAL_DAY_DEFICIT
+        lo = maintenance - hi_def + extra_burn
+        hi = maintenance - lo_def + extra_burn
+        label = "Rest day" + (" + extra exercise" if extra_burn else "")
+        return _round25(lo), _round25(hi), label
+
+    burn = 0.0
+    tags_found = []
+    total_km = 0.0
+
+    for summary, desc in sessions:
+        tag_match = re.search(r'\[(.*?)\]', summary)
+        tag = tag_match.group(1).upper() if tag_match else ""
+        tags_found.append(tag)
+
+        upper_summary = summary.upper()
+        if "HYROX" in tag or "HYROX" in upper_summary:
+            burn += hyrox_kcal
+
+        km_match = re.search(r'(\d+(?:\.\d+)?)\s*km', summary)  # summary first
+        if not km_match:
+            km_match = re.search(r'(\d+(?:\.\d+)?)\s*km', desc)  # fallback
+        if km_match:
+            dist = float(km_match.group(1))
+            total_km += dist
+            burn += dist * run_kcal_per_km
+
+    burn += extra_burn
+    extra_suffix = " + extra exercise" if extra_burn else ""
+    upper_all = " ".join(tags_found) + " " + " ".join(s for s, _ in sessions).upper()
+
+    # No-deficit days: race day, pacing duty — full maintenance + burn
+    if "RACE" in upper_all or "PACE" in upper_all:
+        label = ("🏁 Race/pace day — fuel fully, no deficit" if "RACE" in upper_all else "Pacing duty — fuel fully, no deficit") + extra_suffix
+        target = maintenance + burn
+        return _round25(target - 50), _round25(target + 100), label
+
+    # Pick the most demanding tag present, for the label
+    label = "Training day"
+    for candidate in _TAG_PRIORITY:
+        if any(candidate in t for t in tags_found):
+            pretty = candidate.lower().capitalize()
+            label = f"{pretty} day ({total_km:.0f}km)" if total_km and candidate in ("LONG RUN", "EASY") else f"{pretty} day"
+            break
+    if "HYROX" in upper_all:
+        label = "Hyrox day" + (f" + {total_km:.0f}km" if total_km else "")
+    label += extra_suffix
+
+    lo_def, hi_def = NORMAL_DAY_DEFICIT
+    lo = maintenance - hi_def + burn
+    hi = maintenance - lo_def + burn
+    return _round25(lo), _round25(hi), label
+
+
+def _round25(n: float) -> int:
+    return int(round(n / 25) * 25)
+
+
+# ── Extra exercise: gym/strength/cardio NOT in TRAINING_PLAN ──────────
+# Flat per-session estimates at reference weight (63kg), scaled by
+# _weight_scale() for the current profile. Cardio burns more per minute
+# than strength at comparable effort, hence the separate tables.
+CARDIO_KCAL = {"light": 200, "moderate": 400, "hard": 600}
+STRENGTH_KCAL = {"light": 150, "moderate": 280, "hard": 420}
+_INTENSITY_LABEL = {"light": "light (~30min)", "moderate": "moderate (~45-60min)", "hard": "hard/long (~60-90min)"}
+
+
+def _add_extra_exercise_entry(day: str, ex_type: str, intensity: str, kcal: int):
+    data = _load()
+    data.setdefault("exercise_extra", {}).setdefault(day, []).append({
+        "type": ex_type, "intensity": intensity, "kcal": kcal,
+        "logged_at": datetime.now().isoformat(timespec="seconds"),
+    })
+    _save(data)
+
+
+def _get_extra_exercise_entries(day: str) -> list:
+    data = _load()
+    return data.get("exercise_extra", {}).get(day, [])
+
+
+def _get_extra_exercise_total(day: str) -> int:
+    return sum(e.get("kcal", 0) for e in _get_extra_exercise_entries(day))
+
+
+def _undo_last_extra_exercise(day: str) -> dict | None:
+    data = _load()
+    entries = data.get("exercise_extra", {}).setdefault(day, [])
+    if not entries:
+        return None
+    removed = entries.pop()
+    _save(data)
+    return removed
 
 
 # ── Claude estimation prompt — Singapore-aware ───────────────────────
@@ -330,12 +388,11 @@ async def estimate_food_from_text(description: str) -> dict | None:
         return None
 
 
-# ── UI: menu ──────────────────────────────────────────────────────────
+# ── UI: food menu ────────────────────────────────────────────────────
 def _food_menu_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📷 Log via Photo", callback_data="food|photo"),
          InlineKeyboardButton("✍️ Log via Text", callback_data="food|text")],
-        [InlineKeyboardButton("🏋️ Extra Exercise", callback_data="exercise_menu")],
         [InlineKeyboardButton("📊 Today's Totals", callback_data="food|today"),
          InlineKeyboardButton("📅 This Week", callback_data="food|week")],
     ])
@@ -343,53 +400,9 @@ def _food_menu_keyboard():
 
 async def food_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🍽️ *Log Food*\n\nHow do you want to log this meal? Or log an extra "
-        "gym/cardio session that's not already on your training plan.",
+        "🍽️ *Log Food*\n\nHow do you want to log this meal?",
         parse_mode="Markdown",
         reply_markup=_food_menu_keyboard()
-    )
-
-
-# ── UI: extra exercise (gym/strength/cardio not on the training plan) ──
-def _exercise_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🟢 Light (~30min)", callback_data="exercise|light")],
-        [InlineKeyboardButton("🟡 Moderate (~45-60min)", callback_data="exercise|moderate")],
-        [InlineKeyboardButton("🔴 Hard/long (~60-90min)", callback_data="exercise|hard")],
-        [InlineKeyboardButton("↩️ Undo today's extra", callback_data="exercise|reset")],
-    ])
-
-
-async def cb_exercise_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(
-        "🏋️ *Extra Exercise*\n\nGym, strength, extra cardio — doesn't matter "
-        "which, just pick roughly how much it took out of you. No need to be precise.",
-        parse_mode="Markdown",
-        reply_markup=_exercise_keyboard()
-    )
-
-
-async def cb_exercise_log(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    _, level = query.data.split("|")
-    today = date.today().isoformat()
-
-    if level == "reset":
-        _reset_extra_exercise(today)
-        await query.answer("Cleared")
-        await query.edit_message_text("Cleared today's extra exercise adjustment.")
-        return
-
-    kcal = EXTRA_EXERCISE_KCAL[level]
-    _add_extra_exercise(today, kcal)
-    await query.answer(f"+{kcal} kcal added")
-    lo, hi, label = compute_daily_target()
-    await query.edit_message_text(
-        f"🏋️ Logged: {EXTRA_EXERCISE_LABEL[level]} (+{kcal} kcal)\n\n"
-        f"Today's target is now *{lo}-{hi} kcal* ({label})",
-        parse_mode="Markdown"
     )
 
 
@@ -529,7 +542,7 @@ async def food_cancel_conv(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ── Views ─────────────────────────────────────────────────────────────
+# ── Views: today / week ──────────────────────────────────────────────
 async def _send_today_summary(reply_target, day: str = None):
     day = day or date.today().isoformat()
     logs = _logs_for_day(day)
@@ -540,7 +553,8 @@ async def _send_today_summary(reply_target, day: str = None):
         target_str = f"{lo}-{hi} ({label})"
     else:
         lo_def, hi_def = NORMAL_DAY_DEFICIT
-        lo, hi = _round25(REST_DAY_MAINTENANCE - hi_def), _round25(REST_DAY_MAINTENANCE - lo_def)
+        maintenance = _rest_day_maintenance()
+        lo, hi = _round25(maintenance - hi_def), _round25(maintenance - lo_def)
         target_str = f"{lo}-{hi}"
 
     if not logs:
@@ -596,9 +610,175 @@ async def cb_food_menu_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await cb_food_week(update, ctx)
 
 
+# ── UI: extra exercise (standalone main-menu entry) ────────────────────
+def _exercise_type_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏃 Cardio", callback_data="extype|cardio"),
+         InlineKeyboardButton("🏋️ Strength", callback_data="extype|strength")],
+        [InlineKeyboardButton("↩️ Undo my last entry", callback_data="exundo")],
+    ])
+
+
+async def exercise_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🏋️ *Extra Exercise*\n\nGym, strength, extra cardio — log anything not "
+        "already on your training plan. Was this cardio or strength?",
+        parse_mode="Markdown",
+        reply_markup=_exercise_type_keyboard()
+    )
+
+
+def _intensity_keyboard(ex_type: str):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"🟢 {_INTENSITY_LABEL['light']}", callback_data=f"exlevel|{ex_type}|light")],
+        [InlineKeyboardButton(f"🟡 {_INTENSITY_LABEL['moderate']}", callback_data=f"exlevel|{ex_type}|moderate")],
+        [InlineKeyboardButton(f"🔴 {_INTENSITY_LABEL['hard']}", callback_data=f"exlevel|{ex_type}|hard")],
+    ])
+
+
+async def cb_exercise_type(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, ex_type = query.data.split("|")
+    icon = "🏃" if ex_type == "cardio" else "🏋️"
+    await query.edit_message_text(
+        f"{icon} How much did it take out of you? Rough is fine — no need to be precise.",
+        reply_markup=_intensity_keyboard(ex_type)
+    )
+
+
+async def cb_exercise_level(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    _, ex_type, intensity = query.data.split("|")
+    table = CARDIO_KCAL if ex_type == "cardio" else STRENGTH_KCAL
+    kcal = round(table[intensity] * _weight_scale())
+    today = date.today().isoformat()
+    _add_extra_exercise_entry(today, ex_type, intensity, kcal)
+    await query.answer(f"+{kcal} kcal added")
+    lo, hi, label = compute_daily_target()
+    icon = "🏃" if ex_type == "cardio" else "🏋️"
+    await query.edit_message_text(
+        f"{icon} Logged: {ex_type} — {_INTENSITY_LABEL[intensity]} (+{kcal} kcal)\n\n"
+        f"Today's target is now *{lo}-{hi} kcal* ({label})",
+        parse_mode="Markdown"
+    )
+
+
+async def cb_exercise_undo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    today = date.today().isoformat()
+    removed = _undo_last_extra_exercise(today)
+    if removed:
+        await query.answer("Removed")
+        await query.edit_message_text(
+            f"↩️ Removed: {removed['type']} — {removed.get('intensity', '')} ({removed['kcal']} kcal)."
+        )
+    else:
+        await query.answer("Nothing to undo")
+        await query.edit_message_text("No extra exercise logged today.")
+
+
+# ── UI: profile (standalone main-menu entry) ────────────────────────────
+def _profile_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Update Weight", callback_data="profile|weight")],
+        [InlineKeyboardButton("✏️ Update Full Profile", callback_data="profile|full")],
+    ])
+
+
+async def profile_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    p = _get_profile()
+    bmr = _bmr(p)
+    maint = _rest_day_maintenance()
+    text = (
+        f"⚖️ *My Profile*\n\n"
+        f"Weight: {p['weight_kg']}kg\n"
+        f"Height: {p['height_cm']}cm\n"
+        f"Age: {p['age']}\n"
+        f"Sex: {p['sex']}\n\n"
+        f"BMR: ~{bmr:.0f} kcal · Rest-day maintenance: ~{maint:.0f} kcal\n\n"
+        f"_These feed your daily nutrition targets — update your weight here "
+        f"as it changes so targets stay accurate._"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=_profile_keyboard())
+
+
+async def cb_profile_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, which = query.data.split("|")
+    if which == "weight":
+        await query.edit_message_text("Type your current weight in kg (e.g. 61.5):")
+        return PROFILE_AWAIT_WEIGHT
+    p = _get_profile()
+    await query.edit_message_text(
+        "Type your weight, height, age, sex as: `weight, height, age, sex`\n"
+        f"e.g. `61.5, 164, 25, F`\n\n"
+        f"Current: {p['weight_kg']}, {p['height_cm']}, {p['age']}, {p['sex']}",
+        parse_mode="Markdown"
+    )
+    return PROFILE_AWAIT_FULL
+
+
+async def profile_receive_weight(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    raw = update.message.text.strip()
+    try:
+        w = float(re.sub(r'[^\d.]', '', raw))
+        if not (30 <= w <= 200):
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("Couldn't parse that — just send a number, e.g. 61.5")
+        return PROFILE_AWAIT_WEIGHT
+    _save_profile({"weight_kg": w})
+    lo, hi, label = compute_daily_target()
+    await update.message.reply_text(
+        f"✅ Weight updated to {w}kg.\n\nToday's target recalculated: *{lo}-{hi} kcal* ({label})",
+        parse_mode="Markdown"
+    )
+    return ConversationHandler.END
+
+
+async def profile_receive_full(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    raw = update.message.text.strip()
+    parts = [p.strip() for p in raw.split(",")]
+    if len(parts) != 4:
+        await update.message.reply_text(
+            "Please send exactly 4 values separated by commas: `weight, height, age, sex`",
+            parse_mode="Markdown"
+        )
+        return PROFILE_AWAIT_FULL
+    try:
+        w = float(parts[0])
+        h = float(parts[1])
+        a = int(float(parts[2]))
+        sex = parts[3].strip().upper()[0]
+        if sex not in ("M", "F"):
+            raise ValueError
+        if not (30 <= w <= 200 and 100 <= h <= 220 and 10 <= a <= 100):
+            raise ValueError
+    except (ValueError, IndexError):
+        await update.message.reply_text(
+            "Couldn't parse that. Format: `61.5, 164, 25, F`", parse_mode="Markdown"
+        )
+        return PROFILE_AWAIT_FULL
+    _save_profile({"weight_kg": w, "height_cm": h, "age": a, "sex": sex})
+    lo, hi, label = compute_daily_target()
+    await update.message.reply_text(
+        f"✅ Profile updated.\n\nToday's target recalculated: *{lo}-{hi} kcal* ({label})",
+        parse_mode="Markdown"
+    )
+    return ConversationHandler.END
+
+
+async def profile_cancel_conv(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Cancelled.")
+    return ConversationHandler.END
+
+
 # ── Registration ─────────────────────────────────────────────────────
 def register(app):
-    """Call once from bot.py's main(), before app.run_polling()."""
+    """Call once from bot.py's main(), before app.run_polling() and BEFORE
+    the generic photo/text catch-all MessageHandlers."""
     food_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(cb_food_start_photo, pattern=r"^food\|photo$"),
@@ -617,11 +797,22 @@ def register(app):
         fallbacks=[CommandHandler("cancel", food_cancel_conv)],
         per_message=False,
     )
+    profile_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_profile_start, pattern=r"^profile\|")],
+        states={
+            PROFILE_AWAIT_WEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, profile_receive_weight)],
+            PROFILE_AWAIT_FULL: [MessageHandler(filters.TEXT & ~filters.COMMAND, profile_receive_full)],
+        },
+        fallbacks=[CommandHandler("cancel", profile_cancel_conv)],
+        per_message=False,
+    )
     app.add_handler(food_conv)
+    app.add_handler(profile_conv)
     app.add_handler(CallbackQueryHandler(cb_food_menu_router, pattern=r"^food\|(today|week)$"))
     app.add_handler(CallbackQueryHandler(cb_food_save, pattern=r"^food_save$"))
     app.add_handler(CallbackQueryHandler(cb_food_cancel, pattern=r"^food_cancel$"))
-    app.add_handler(CallbackQueryHandler(cb_exercise_menu, pattern=r"^exercise_menu$"))
-    app.add_handler(CallbackQueryHandler(cb_exercise_log, pattern=r"^exercise\|"))
+    app.add_handler(CallbackQueryHandler(cb_exercise_type, pattern=r"^extype\|"))
+    app.add_handler(CallbackQueryHandler(cb_exercise_level, pattern=r"^exlevel\|"))
+    app.add_handler(CallbackQueryHandler(cb_exercise_undo, pattern=r"^exundo$"))
     app.add_handler(CommandHandler("foodtoday", show_today))
     logger.info("food.py handlers registered")

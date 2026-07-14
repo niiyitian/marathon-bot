@@ -222,6 +222,7 @@ def main_menu_keyboard():
             ["📈 Mileage", "💬 Ask Coach"],
             ["🗺 Route Planner", "🆘 Help"],
             ["🍽️ Log Food", "📊 Nutrition"],
+            ["🏋️ Extra Exercise", "⚖️ My Profile"],
         ],
         resize_keyboard=True
     )
@@ -1712,6 +1713,10 @@ async def text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await food.food_menu(update, ctx)
     elif text == "📊 Nutrition":
         return await food.show_today(update, ctx)
+    elif text == "🏋️ Extra Exercise":
+        return await food.exercise_menu(update, ctx)
+    elif text == "⚖️ My Profile":
+        return await food.profile_menu(update, ctx)
     else:
         await update.message.reply_text(
             "Use the menu buttons below, or /help for commands.",
