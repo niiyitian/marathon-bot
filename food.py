@@ -58,6 +58,7 @@ FOOD_AWAIT_INPUT = 300
 FOOD_AWAIT_EDIT = 301
 PROFILE_AWAIT_WEIGHT = 302
 PROFILE_AWAIT_FULL = 303
+FOOD_AWAIT_EXACT = 304
 
 
 # ── Shared-file data helpers (safe merge — never touches other keys) ──
@@ -597,8 +598,9 @@ async def cb_food_start_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 def _confirm_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Save", callback_data="food_save"),
-         InlineKeyboardButton("✏️ Edit", callback_data="food_edit"),
-         InlineKeyboardButton("❌ Cancel", callback_data="food_cancel")],
+         InlineKeyboardButton("✏️ Edit", callback_data="food_edit")],
+        [InlineKeyboardButton("🔢 Enter Exact (from label)", callback_data="food_exact")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="food_cancel")],
     ])
 
 
@@ -704,6 +706,58 @@ async def food_receive_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     ctx.user_data["pending_food"] = est
     await msg.edit_text(_format_estimate(est), parse_mode="Markdown", reply_markup=_confirm_keyboard())
+    return ConversationHandler.END
+
+
+async def cb_food_exact(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "🔢 Got the label in hand? Type the exact values, comma-separated:\n"
+        "`calories, protein(g), carbs(g), fat(g)`\n\n"
+        "e.g. `165, 30.1, 8.1, 1.4`\n\n"
+        "_Tip: use the numbers for the portion you actually had — if the label "
+        "is per 100ml and you drank 200ml, double it first._",
+        parse_mode="Markdown"
+    )
+    return FOOD_AWAIT_EXACT
+
+
+async def food_receive_exact(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    raw = update.message.text.strip()
+    parts = [p.strip() for p in raw.split(",")]
+    if len(parts) != 4:
+        await update.message.reply_text(
+            "Please send exactly 4 numbers separated by commas: `calories, protein, carbs, fat`\n"
+            "e.g. `165, 30.1, 8.1, 1.4`",
+            parse_mode="Markdown"
+        )
+        return FOOD_AWAIT_EXACT
+    try:
+        calories, protein, carbs, fat = [float(p) for p in parts]
+        if min(calories, protein, carbs, fat) < 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "Couldn't parse that — make sure it's 4 plain numbers, e.g. `165, 30.1, 8.1, 1.4`",
+            parse_mode="Markdown"
+        )
+        return FOOD_AWAIT_EXACT
+
+    est = ctx.user_data.get("pending_food") or {}
+    est["calories"] = int(round(calories))
+    est["protein"] = int(round(protein))
+    est["carbs"] = int(round(carbs))
+    est["fat"] = int(round(fat))
+    est["confidence"] = "high"
+    est["notes"] = "Entered manually from nutrition label."
+    est.setdefault("food_name", "Unknown food")
+    est.setdefault("portion", "")
+    ctx.user_data["pending_food"] = est
+
+    await update.message.reply_text(
+        _format_estimate(est), parse_mode="Markdown", reply_markup=_confirm_keyboard()
+    )
     return ConversationHandler.END
 
 
@@ -955,6 +1009,7 @@ def register(app):
             CallbackQueryHandler(cb_food_start_photo, pattern=r"^food\|photo$"),
             CallbackQueryHandler(cb_food_start_text, pattern=r"^food\|text$"),
             CallbackQueryHandler(cb_food_edit, pattern=r"^food_edit$"),
+            CallbackQueryHandler(cb_food_exact, pattern=r"^food_exact$"),
         ],
         states={
             FOOD_AWAIT_INPUT: [
@@ -963,6 +1018,9 @@ def register(app):
             ],
             FOOD_AWAIT_EDIT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, food_receive_edit),
+            ],
+            FOOD_AWAIT_EXACT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, food_receive_exact),
             ],
         },
         fallbacks=[CommandHandler("cancel", food_cancel_conv)],
