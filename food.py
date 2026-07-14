@@ -142,36 +142,123 @@ _TAG_PRIORITY = ["RACE", "PACE", "HYROX", "LONG RUN", "MP RUN", "TEMPO", "TRACK"
 
 
 def _today_sessions() -> list:
-    """Pull today's scheduled session(s) from bot.py's TRAINING_PLAN, if any.
-    Returns list of (summary, desc). Lazy import avoids a circular import
-    (bot.py imports food.py at load time)."""
+    """Pull today's scheduled session(s) from bot.py's TRAINING_PLAN, WITH any
+    edits applied — mirrors bot.py's own session_display() override logic
+    (data["edits"][uid] overrides "summary"/"desc"), since editing a session
+    via "✏️ Edit Tuesday/Thursday" does NOT change TRAINING_PLAN itself, only
+    the edits dict in the shared data.json. Returns list of (summary, desc).
+    Lazy import avoids a circular import (bot.py imports food.py at load time)."""
     try:
         import bot as _bot
     except ImportError:
         return []
     today = date.today().isoformat()
-    return [(s[2], s[3]) for s in _bot.TRAINING_PLAN if s[1] == today]
+    edits = _load().get("edits", {})
+    out = []
+    for s in _bot.TRAINING_PLAN:
+        uid, dt, summary, desc = s[0], s[1], s[2], s[3]
+        if dt != today:
+            continue
+        override = edits.get(uid, {})
+        summary = override.get("summary", summary)
+        desc = override.get("desc", desc)
+        out.append((summary, desc))
+    return out
+
+
+def _classify_tag(summary: str) -> str:
+    """Extract session type from a [Tag] bracket if present. Edited sessions
+    often DON'T have a bracket (the user just typed free text, e.g. "Tempo
+    Run Club - 6x10mins..."), so fall back to a keyword search in the
+    summary itself (never the desc/notes, to avoid false-matching phrases
+    like 'skip club tempo' in coach notes)."""
+    tag_match = re.search(r'\[(.*?)\]', summary)
+    if tag_match:
+        return tag_match.group(1).upper()
+    upper_summary = summary.upper()
+    for candidate in _TAG_PRIORITY:
+        if candidate in upper_summary:
+            return candidate
+    return ""
+
+
+# ── Manual per-day override — for when training gets reshuffled and the
+#    plan/edits no longer reflect what's actually happening today. Only
+#    affects nutrition targeting; never touches TRAINING_PLAN or edits. ──
+_OVERRIDE_TYPES = [
+    ("EASY", "🟢 Easy"), ("TEMPO", "🟠 Tempo"), ("TRACK", "🔵 Track"),
+    ("LONG RUN", "🟣 Long run"), ("MP RUN", "🟤 MP run"),
+    ("HYROX", "🏋️ Hyrox"), ("RACE", "🏁 Race/Pace"), ("REST", "😴 Rest day"),
+]
+_OVERRIDE_KM_PRESETS = [5, 8, 10, 12, 15, 18, 20, 25, 30, 42]
+
+
+def _set_session_override(day: str, session_type: str, km: float | None):
+    data = _load()
+    data.setdefault("session_override", {})[day] = {"type": session_type, "km": km}
+    _save(data)
+
+
+def _get_session_override(day: str) -> dict | None:
+    return _load().get("session_override", {}).get(day)
+
+
+def _clear_session_override(day: str):
+    data = _load()
+    data.get("session_override", {}).pop(day, None)
+    _save(data)
 
 
 def compute_daily_target() -> tuple:
     """Returns (low, high, label) for today's calorie target: rest-day
     maintenance (from your CURRENT profile) ± deficit, adjusted for whatever's
-    on the training plan today, PLUS any extra gym/cardio/strength logged via
-    the Extra Exercise menu. Parses the [Tag] bracket from each session's
-    SUMMARY only (never the free-text coach notes, which can contain
-    misleading substrings like 'skip club tempo')."""
+    actually happening today, PLUS any extra gym/cardio/strength logged via
+    the Extra Exercise menu.
+
+    Priority order:
+    1. Manual override ("🔀 Adjust Today's Session") — wins if set, since it's
+       an explicit statement of what's actually happening today.
+    2. Training plan + edits (from TRAINING_PLAN + data["edits"]).
+    3. Rest day, if nothing's scheduled and no override is set.
+    """
     today = date.today().isoformat()
     maintenance = _rest_day_maintenance()
     run_kcal_per_km = _run_kcal_per_km()
     hyrox_kcal = HYROX_KCAL_BASE * _weight_scale()
     extra_burn = _get_extra_exercise_total(today)
+    extra_suffix = " + extra exercise" if extra_burn else ""
+    lo_def, hi_def = NORMAL_DAY_DEFICIT
+
+    override = _get_session_override(today)
+    if override:
+        type_ = override["type"]
+        km = override.get("km") or 0.0
+        burn = km * run_kcal_per_km
+        if type_ == "HYROX":
+            burn += hyrox_kcal
+        burn += extra_burn
+
+        if type_ == "RACE":
+            label = "🏁 Race/pace day — fuel fully, no deficit (manual)" + extra_suffix
+            target = maintenance + burn
+            return _round25(target - 50), _round25(target + 100), label
+        if type_ == "REST":
+            lo = maintenance - hi_def + extra_burn
+            hi = maintenance - lo_def + extra_burn
+            return _round25(lo), _round25(hi), "Rest day (manual)" + extra_suffix
+
+        pretty = type_.lower().capitalize()
+        label = (f"{pretty} day ({km:.0f}km, manual)" if km else f"{pretty} day (manual)") + extra_suffix
+        lo = maintenance - hi_def + burn
+        hi = maintenance - lo_def + burn
+        return _round25(lo), _round25(hi), label
+
     sessions = _today_sessions()
 
     if not sessions:
-        lo_def, hi_def = NORMAL_DAY_DEFICIT
         lo = maintenance - hi_def + extra_burn
         hi = maintenance - lo_def + extra_burn
-        label = "Rest day" + (" + extra exercise" if extra_burn else "")
+        label = "Rest day" + extra_suffix
         return _round25(lo), _round25(hi), label
 
     burn = 0.0
@@ -179,12 +266,10 @@ def compute_daily_target() -> tuple:
     total_km = 0.0
 
     for summary, desc in sessions:
-        tag_match = re.search(r'\[(.*?)\]', summary)
-        tag = tag_match.group(1).upper() if tag_match else ""
+        tag = _classify_tag(summary)
         tags_found.append(tag)
 
-        upper_summary = summary.upper()
-        if "HYROX" in tag or "HYROX" in upper_summary:
+        if "HYROX" in tag:
             burn += hyrox_kcal
 
         km_match = re.search(r'(\d+(?:\.\d+)?)\s*km', summary)  # summary first
@@ -196,8 +281,7 @@ def compute_daily_target() -> tuple:
             burn += dist * run_kcal_per_km
 
     burn += extra_burn
-    extra_suffix = " + extra exercise" if extra_burn else ""
-    upper_all = " ".join(tags_found) + " " + " ".join(s for s, _ in sessions).upper()
+    upper_all = " ".join(tags_found)
 
     # No-deficit days: race day, pacing duty — full maintenance + burn
     if "RACE" in upper_all or "PACE" in upper_all:
@@ -216,7 +300,6 @@ def compute_daily_target() -> tuple:
         label = "Hyrox day" + (f" + {total_km:.0f}km" if total_km else "")
     label += extra_suffix
 
-    lo_def, hi_def = NORMAL_DAY_DEFICIT
     lo = maintenance - hi_def + burn
     hi = maintenance - lo_def + burn
     return _round25(lo), _round25(hi), label
@@ -393,6 +476,7 @@ def _food_menu_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📷 Log via Photo", callback_data="food|photo"),
          InlineKeyboardButton("✍️ Log via Text", callback_data="food|text")],
+        [InlineKeyboardButton("🔀 Adjust Today's Session", callback_data="sessover_menu")],
         [InlineKeyboardButton("📊 Today's Totals", callback_data="food|today"),
          InlineKeyboardButton("📅 This Week", callback_data="food|week")],
     ])
@@ -403,6 +487,93 @@ async def food_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "🍽️ *Log Food*\n\nHow do you want to log this meal?",
         parse_mode="Markdown",
         reply_markup=_food_menu_keyboard()
+    )
+
+
+# ── UI: adjust today's session (manual override for nutrition targeting) ──
+def _override_type_keyboard():
+    rows, row = [], []
+    for type_, label in _OVERRIDE_TYPES:
+        row.append(InlineKeyboardButton(label, callback_data=f"sessover_type|{type_}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("↩️ Revert to plan", callback_data="sessover_clear")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _override_km_keyboard(session_type: str):
+    rows, row = [], []
+    for km in _OVERRIDE_KM_PRESETS:
+        row.append(InlineKeyboardButton(f"{km}km", callback_data=f"sessover_km|{session_type}|{km}"))
+        if len(row) == 5:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
+
+
+async def cb_sessover_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "🔀 *Adjust Today's Session*\n\nMoving things around this week? Tell me what "
+        "you're actually doing today and I'll recalculate the target. This only "
+        "affects today's nutrition — your training plan stays untouched.",
+        parse_mode="Markdown",
+        reply_markup=_override_type_keyboard()
+    )
+
+
+async def cb_sessover_type(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, session_type = query.data.split("|")
+    today = date.today().isoformat()
+
+    if session_type in ("REST", "HYROX", "RACE"):
+        _set_session_override(today, session_type, None)
+        lo, hi, label = compute_daily_target()
+        pretty = session_type.lower().capitalize() if session_type != "RACE" else "Race/Pace"
+        await query.edit_message_text(
+            f"✅ Today set to {pretty}.\n\nTarget: *{lo}-{hi} kcal* ({label})",
+            parse_mode="Markdown"
+        )
+        return
+
+    await query.edit_message_text(
+        f"How many km? Pick the closest:",
+        reply_markup=_override_km_keyboard(session_type)
+    )
+
+
+async def cb_sessover_km(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, session_type, km_str = query.data.split("|")
+    km = float(km_str)
+    today = date.today().isoformat()
+    _set_session_override(today, session_type, km)
+    lo, hi, label = compute_daily_target()
+    pretty = session_type.lower().capitalize()
+    await query.edit_message_text(
+        f"✅ Today set to {pretty} ({km:.0f}km).\n\nTarget: *{lo}-{hi} kcal* ({label})",
+        parse_mode="Markdown"
+    )
+
+
+async def cb_sessover_clear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    today = date.today().isoformat()
+    _clear_session_override(today)
+    await query.answer("Reverted")
+    lo, hi, label = compute_daily_target()
+    await query.edit_message_text(
+        f"↩️ Reverted to your training plan.\n\nTarget: *{lo}-{hi} kcal* ({label})",
+        parse_mode="Markdown"
     )
 
 
@@ -814,5 +985,9 @@ def register(app):
     app.add_handler(CallbackQueryHandler(cb_exercise_type, pattern=r"^extype\|"))
     app.add_handler(CallbackQueryHandler(cb_exercise_level, pattern=r"^exlevel\|"))
     app.add_handler(CallbackQueryHandler(cb_exercise_undo, pattern=r"^exundo$"))
+    app.add_handler(CallbackQueryHandler(cb_sessover_menu, pattern=r"^sessover_menu$"))
+    app.add_handler(CallbackQueryHandler(cb_sessover_type, pattern=r"^sessover_type\|"))
+    app.add_handler(CallbackQueryHandler(cb_sessover_km, pattern=r"^sessover_km\|"))
+    app.add_handler(CallbackQueryHandler(cb_sessover_clear, pattern=r"^sessover_clear$"))
     app.add_handler(CommandHandler("foodtoday", show_today))
     logger.info("food.py handlers registered")
