@@ -19,6 +19,8 @@ from telegram.ext import (
     ConversationHandler, filters, ContextTypes
 )
 
+import food
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -219,6 +221,7 @@ def main_menu_keyboard():
             ["🏁 Race Debrief", "🗓 Race Manager"],
             ["📈 Mileage", "💬 Ask Coach"],
             ["🗺 Route Planner", "🆘 Help"],
+            ["🍽️ Log Food", "📊 Nutrition"],
         ],
         resize_keyboard=True
     )
@@ -1705,6 +1708,10 @@ async def text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await route_planner_start(update, ctx)
     elif text == "🆘 Help":
         await show_help(update, ctx)
+    elif text == "🍽️ Log Food":
+        return await food.food_menu(update, ctx)
+    elif text == "📊 Nutrition":
+        return await food.show_today(update, ctx)
     else:
         await update.message.reply_text(
             "Use the menu buttons below, or /help for commands.",
@@ -2083,6 +2090,8 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_markdone, pattern=r"^markdone\|"))
     app.add_handler(CallbackQueryHandler(cb_upload_session, pattern=r"^upload_session\|"))
     app.add_handler(CallbackQueryHandler(cb_back_weeks, pattern=r"^back_weeks$"))
+
+    food.register(app)
 
     app.add_handler(MessageHandler(filters.PHOTO, receive_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
