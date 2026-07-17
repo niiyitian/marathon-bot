@@ -58,24 +58,27 @@ TRAINING_PLAN = [
   ("w04_sat", "2026-07-18", "W04 · [Long run] Easy long run 12km @ 7:30–8:00/km", "Recovery week. No pressure on pace.", False, False),
   # W05
   ("w05_tue", "2026-07-21", "W05 · [Tempo] Run club — 70min easy + 2×10min @ 6:50/km", "Modified — don't do the full 3×20. Big long run Saturday.", False, True),
-  ("w05_wed", "2026-07-22", "W05 · [Easy] Easy 5km @ 7:45/km", "", False, False),
+  ("w05_wed", "2026-07-22", "W05 · [Easy] Easy 6km @ 7:45/km", "", False, False),
   ("w05_thu", "2026-07-23", "W05 · [Track] Track club — 8×1km @ 5:40/km", "", True, False),
   ("w05_sat", "2026-07-25", "W05 · [Long run] Long run 18km @ 7:30/km", "Carry water. Plan a looped route. New distance milestone.", False, False),
   # W06
   ("w06_tue", "2026-07-28", "W06 · [Tempo] Run club — full session: 70min + 3×20min @ 6:50/km", "Good quality week. Recover well after.", False, True),
-  ("w06_wed", "2026-07-29", "W06 · [Easy] Easy 5km @ 7:45/km", "", False, False),
+  ("w06_wed", "2026-07-29", "W06 · [Easy] Easy 6km @ 7:45/km", "", False, False),
   ("w06_thu", "2026-07-30", "W06 · [Track] Track club — 12×300m @ 5:45/km", "", True, False),
   ("w06_sat", "2026-08-01", "W06 · [Long run] Long run 20km @ 7:30–7:45/km", "MILESTONE: first 20km. Bring a gel — take at 60min. Walk 1 min every 5km if needed.", False, False),
+  ("w06_sun", "2026-08-02", "W06 · [Easy] Easy recovery 5km @ 8:00–8:15/km", "Extra aerobic volume — building your base. Very easy, skip if legs are trashed from yesterday.", False, False),
   # W07
   ("w07_tue", "2026-08-04", "W07 · [Tempo] Run club — full tempo session", "", False, True),
   ("w07_wed", "2026-08-05", "W07 · [MP run] Marathon pace run: 10km @ 7:00–7:05/km", "Replaces easy mid-week run. Controlled effort — not racing.", False, False),
   ("w07_thu", "2026-08-06", "W07 · [Track] Track club — 2×2km + 6×200m", "2km @ 6:00/km. Feel the pace difference from Wednesday.", True, False),
   ("w07_sat", "2026-08-08", "W07 · [Long run] Long run 22km @ 7:30/km", "Fuel at 45min and 90min. Practice your race-day gel routine.", False, False),
+  ("w07_sun", "2026-08-09", "W07 · [Easy] Easy recovery 5km @ 8:00–8:15/km", "Extra aerobic volume. Should feel almost too easy.", False, False),
   # W08
   ("w08_tue", "2026-08-11", "W08 · [Tempo] Run club — 3×20min tempo @ 6:50/km", "", False, True),
   ("w08_wed", "2026-08-12", "W08 · [MP run] Marathon pace run: 12km @ 7:00/km", "", False, False),
   ("w08_thu", "2026-08-13", "W08 · [Track] Track club — 8×1km @ 5:40/km", "", True, False),
   ("w08_sat", "2026-08-15", "W08 · [Long run] Long run 24km @ 7:20–7:30/km", "Last 4km push to 7:00/km if feeling good.", False, False),
+  ("w08_sun", "2026-08-16", "W08 · [Easy] Easy recovery 6km @ 8:00–8:15/km", "Extra aerobic volume, very easy pace.", False, False),
   # W09
   ("w09_tue", "2026-08-18", "W09 · [Easy] Easy run with club — 50min @ 7:30/km only", "Skip or shorten the tempo portion.", False, True),
   ("w09_wed", "2026-08-19", "W09 · [Easy] Easy 5km @ 7:45/km", "", False, False),
@@ -86,11 +89,13 @@ TRAINING_PLAN = [
   ("w10_wed", "2026-08-26", "W10 · [MP run] Marathon pace run: 12km @ 7:00/km", "", False, False),
   ("w10_thu", "2026-08-27", "W10 · [Track] Track club — 8×1km @ 5:40/km", "", True, False),
   ("w10_sat", "2026-08-29", "W10 · [Long run] Long run 26km @ 7:30/km", "Gel at 45, 90, 135min. Aim for negative split — 2nd half slightly faster.", False, False),
+  ("w10_sun", "2026-08-30", "W10 · [Easy] Easy recovery 6km @ 8:00–8:15/km", "Extra aerobic volume after yesterday's 26km.", False, False),
   # W11
   ("w11_tue", "2026-09-01", "W11 · [Tempo] Run club — 70min + 2×20min @ 6:50/km", "Slightly reduced — big long run coming Saturday.", False, True),
   ("w11_wed", "2026-09-02", "W11 · [MP run] Marathon pace: 10km @ 7:00/km", "", False, False),
   ("w11_thu", "2026-09-03", "W11 · [Track] Track club — 12×300m @ 5:45/km", "", True, False),
   ("w11_sat", "2026-09-05", "W11 · [Long run] Long run 28km @ 7:30/km", "Confidence builder. Run your own pace. Gel every 45min.", False, False),
+  ("w11_sun", "2026-09-06", "W11 · [Easy] Easy recovery 6km @ 8:00–8:15/km", "Extra aerobic volume after yesterday's 28km.", False, False),
   # W12
   ("w12_tue", "2026-09-08", "W12 · [Tempo] Run club — 70min + 1×20min tempo @ 6:50/km", "Reduce to 1 tempo rep only.", False, True),
   ("w12_wed", "2026-09-09", "W12 · [Easy] Easy 6km @ 7:30/km", "", False, False),
@@ -111,17 +116,20 @@ TRAINING_PLAN = [
   ("w16_tue", "2026-10-06", "W16 · [Tempo] Run club — full tempo: 3×20min @ 6:50/km", "", False, True),
   ("w16_wed", "2026-10-07", "W16 · [MP run] Marathon pace: 12km @ 7:00/km", "", False, False),
   ("w16_thu", "2026-10-08", "W16 · [Track] Track club — 8×1km @ 5:40/km", "", True, False),
-  ("w16_sat", "2026-10-10", "W16 · [Long run] Long run 28km @ 7:20/km", "Race-day shoes and gels. Simulate Dec 6 exactly.", False, False),
+  ("w16_sat", "2026-10-10", "W16 · [Long run] Long run 29km @ 7:20/km", "Race-day shoes and gels. Simulate Dec 6 exactly.", False, False),
+  ("w16_sun", "2026-10-11", "W16 · [Easy] Easy recovery 6km @ 8:00–8:15/km", "Extra aerobic volume — building toward peak weeks.", False, False),
   # W17
   ("w17_tue", "2026-10-13", "W17 · [Tempo] Run club — 3×20min @ 6:50/km", "", False, True),
   ("w17_wed", "2026-10-14", "W17 · [MP run] Marathon pace: 14km @ 7:00/km", "Longest MP run in the plan. Controlled effort.", False, False),
   ("w17_thu", "2026-10-15", "W17 · [Track] Track club — 2×2km + 6×200m", "", True, False),
-  ("w17_sat", "2026-10-17", "W17 · [Long run] Long run 30km @ 7:15–7:20/km", "Race-day kit. Gel at 45, 90, 135min. Last 5km @ 7:00/km.", False, False),
+  ("w17_sat", "2026-10-17", "W17 · [Long run] Long run 32km @ 7:15–7:20/km", "Race-day kit. Gel at 45, 90, 135min. Last 5km @ 7:00/km.", False, False),
+  ("w17_sun", "2026-10-18", "W17 · [Easy] Easy recovery 6km @ 8:00–8:15/km", "Extra aerobic volume — nearly at peak week.", False, False),
   # W18
   ("w18_tue", "2026-10-20", "W18 · [Tempo] Run club — 2×20min @ 6:50/km only", "Reduce to 2 reps — big 32km coming Saturday.", False, True),
   ("w18_wed", "2026-10-21", "W18 · [MP run] Marathon pace: 10km @ 7:00/km", "", False, False),
   ("w18_thu", "2026-10-22", "W18 · [Track] Track club — 8×1km @ 5:40/km", "", True, False),
-  ("w18_sat", "2026-10-24", "W18 · [Long run] Long run 32km @ 7:20/km", "PEAK RUN. Gel at 45, 90, 135, 165min. Run through fatigue. You earned this.", False, False),
+  ("w18_sat", "2026-10-24", "W18 · [Long run] Long run 34km @ 7:20/km", "PEAK RUN. Gel at 45, 90, 135, 165min. Run through fatigue. You earned this.", False, False),
+  ("w18_sun", "2026-10-25", "W18 · [Easy] Easy recovery 6km @ 8:00–8:15/km", "Peak week volume. Very easy — this is about durability, not speed.", False, False),
   # W19
   ("w19_tue", "2026-10-27", "W19 · [Easy] Easy 5km @ 7:45/km — skip club", "", False, False),
   ("w19_thu", "2026-10-29", "W19 · [Easy] Easy 5km + strides — skip track", "", False, False),
@@ -718,31 +726,31 @@ async def _edit_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE, is_thu: bo
     data = load_data()
     day_name = "Thursday Track" if is_thu else "Tuesday Run Club"
     ctx.user_data["edit_is_thu"] = is_thu
+    today = date.today()
 
-    # Show all sessions of the right type (past and future)
+    # Show only upcoming sessions of the right type (past ones just clutter the list)
     editable = []
     for s in TRAINING_PLAN:
         uid, dt, summary, desc, thu_flag, tue_flag = s
+        if date.fromisoformat(dt) < today:
+            continue
         if (is_thu and thu_flag) or (not is_thu and tue_flag):
             editable.append(s)
 
     if not editable:
-        await update.message.reply_text(f"No {day_name} sessions found.")
+        await update.message.reply_text(f"No upcoming {day_name} sessions found.")
         return
 
-    today = date.today()
     buttons = []
     for s in editable:
         uid, dt, summary, _, _, _ = s
         override = data.get("edits", {}).get(uid, {})
         display = override.get("summary", summary)
-        s_date = date.fromisoformat(dt)
-        past_marker = "· " if s_date < today else ""
-        label = f"{past_marker}{dt}: {display[:32]}…" if len(display) > 32 else f"{past_marker}{dt}: {display}"
+        label = f"{dt}: {display[:36]}…" if len(display) > 36 else f"{dt}: {display}"
         buttons.append([InlineKeyboardButton(label, callback_data=f"edit_pick|{uid}")])
 
     await update.message.reply_text(
-        f"✏️ *Edit {day_name} Sessions*\n\nAll sessions shown — past ones marked with ·",
+        f"✏️ *Edit {day_name} Sessions*\n\nUpcoming sessions only — past ones aren't editable here.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
