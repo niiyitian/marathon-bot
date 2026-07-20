@@ -492,8 +492,6 @@ async def analyse_with_claude(image_bytes: bytes, session_summary: str, session_
         return ""
     b64 = base64.standard_b64encode(image_bytes).decode()
 
-    MAX_HR = 184  # Yitian's max HR
-
     recovery_context = ""
     if recovery == "good":
         recovery_context = "The athlete reported good recovery this morning (sleep score ≥72 or HRV ≥60ms). "
@@ -570,6 +568,54 @@ async def extract_distance_from_image(image_bytes: bytes) -> float:
     except Exception as e:
         logger.error(f"Distance extract failed: {e}")
         return 0.0
+
+
+async def extract_activity_data(image_bytes: bytes) -> dict:
+    """Extract distance, duration, avg pace, and avg HR from a Strava/Garmin
+    screenshot in one call — feeds both mileage logging AND the race
+    predictor (auto-PB detection + HR/pace trend). Returns {} on failure or
+    if fields aren't visible in the screenshot (fields default to None)."""
+    if not ANTHROPIC_KEY:
+        return {}
+    b64 = base64.standard_b64encode(image_bytes).decode()
+    prompt = (
+        "Extract activity data from this Strava/Garmin screenshot. Respond with "
+        "ONLY a raw JSON object, no markdown fences, no preamble. Schema:\n"
+        "{\n"
+        '  "distance_km": <float or null if not visible>,\n'
+        '  "duration_sec": <integer total seconds or null>,\n'
+        '  "avg_pace_sec_per_km": <integer seconds/km or null>,\n'
+        '  "avg_hr": <integer bpm or null if not visible>\n'
+        "}\n"
+        "If duration is shown but pace isn't (or vice versa), derive the missing "
+        "one from distance. If a field genuinely isn't visible, use null — don't guess."
+    )
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                json={
+                    "model": "claude-sonnet-4-6",
+                    "max_tokens": 150,
+                    "messages": [{"role": "user", "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                        {"type": "text", "text": prompt}
+                    ]}]
+                }
+            )
+        text = resp.json()["content"][0]["text"].strip()
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE)
+        obj = json.loads(text)
+        return {
+            "distance_km": float(obj["distance_km"]) if obj.get("distance_km") is not None else None,
+            "duration_sec": int(obj["duration_sec"]) if obj.get("duration_sec") is not None else None,
+            "avg_pace_sec_per_km": int(obj["avg_pace_sec_per_km"]) if obj.get("avg_pace_sec_per_km") is not None else None,
+            "avg_hr": int(obj["avg_hr"]) if obj.get("avg_hr") is not None else None,
+        }
+    except Exception as e:
+        logger.error(f"Activity data extract failed: {e}")
+        return {}
 
 
 async def receive_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -653,13 +699,32 @@ async def receive_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Photo analysis error: {e}")
 
-        # Extract distance and ask which shoe + auto-log mileage (only on first image)
+        # Extract full activity data (distance/duration/pace/HR) — feeds mileage
+        # log, auto-PB detection, and the HR/pace trend used by predictions
         if not is_additional:
             try:
-                km = await extract_distance_from_image(image_bytes)
+                activity = await extract_activity_data(image_bytes)
+                km = activity.get("distance_km") or 0.0
                 if km > 0:
                     data = load_data()
                     log_mileage(data, current_week_num(), km)
+
+                    # Store the structured extraction on the log entry for reference
+                    data["logs"].setdefault(uid, {})["activity_data"] = activity
+
+                    pb_msg = ""
+                    duration_sec = activity.get("duration_sec")
+                    if duration_sec:
+                        new_pb_key = _maybe_record_pb(data, km, duration_sec)
+                        if new_pb_key:
+                            new_time = get_best_efforts(data)[new_pb_key]
+                            pb_msg = f"\n\n🎉 *New {new_pb_key} PB: {new_time}!* Predictions updated."
+
+                    pace_sec_per_km = activity.get("avg_pace_sec_per_km")
+                    avg_hr = activity.get("avg_hr")
+                    if pace_sec_per_km and avg_hr:
+                        _maybe_record_hr_point(data, name, pace_sec_per_km, avg_hr)
+
                     save_data(data)
 
                     ctx.user_data["auto_gear_km"] = km
@@ -672,7 +737,7 @@ async def receive_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         )])
                     buttons.append([InlineKeyboardButton("⬜ Skip gear tracking", callback_data="autogear|skip|0")])
                     await update.message.reply_text(
-                        f"📊 *{km:.1f}km logged to this week's mileage.*\n\n👟 *Which shoes did you wear?*",
+                        f"📊 *{km:.1f}km logged to this week's mileage.*{pb_msg}\n\n👟 *Which shoes did you wear?*",
                         parse_mode="Markdown",
                         reply_markup=InlineKeyboardMarkup(buttons)
                     )
@@ -827,7 +892,8 @@ async def edit_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ── Race time predictor ───────────────────────────────────────────────
-# Actual Strava best efforts (as of Jun 2026)
+# Seed/fallback best efforts (as of Jun 2026) — auto-updated from logged
+# activity photos via _maybe_record_pb() below, stored in data["best_efforts_auto"].
 BEST_EFFORTS = {
     "400m": "1:48",
     "1K": "5:20",
@@ -835,6 +901,101 @@ BEST_EFFORTS = {
     "10K": "1:05:48",
     "HM": "2:27:45",
 }
+
+MAX_HR = 184  # Yitian's max HR
+
+# Distance bands for auto-detecting which race distance a logged run matches
+_PB_DISTANCE_BANDS = {
+    "1K": (0.9, 1.1), "5K": (4.7, 5.3), "10K": (9.5, 10.5), "HM": (20.5, 21.5),
+}
+# Session tags treated as "quality" efforts worth using for HR/pace trend —
+# easy/long runs are deliberately excluded since they're not run near threshold
+_QUALITY_TAGS = ("TEMPO", "TRACK", "MP RUN")
+_HR_POINTS_MAX = 15  # keep only the most recent — old fitness data goes stale
+
+
+def get_best_efforts(data: dict) -> dict:
+    """Static seed values, overridden per-distance by any faster auto-detected
+    PB logged from an activity screenshot."""
+    auto = data.get("best_efforts_auto", {})
+    out = dict(BEST_EFFORTS)
+    for k, v in auto.items():
+        if k not in out or time_to_sec(v) < time_to_sec(out[k]):
+            out[k] = v
+    return out
+
+
+def _maybe_record_pb(data: dict, distance_km: float, duration_sec: float) -> str | None:
+    """If this run's distance matches a standard race band and beats the
+    current best (seed or auto), record it. Returns the distance key if a
+    new PB was set, else None."""
+    if not distance_km or not duration_sec:
+        return None
+    for key, (lo, hi) in _PB_DISTANCE_BANDS.items():
+        if lo <= distance_km <= hi:
+            # Scale to the exact standard distance so a 10.3km run compares
+            # fairly against a 10K PB, rather than penalizing/flattering it.
+            standard_km = {"1K": 1.0, "5K": 5.0, "10K": 10.0, "HM": 21.1}[key]
+            scaled_sec = duration_sec * (standard_km / distance_km)
+            current = get_best_efforts(data).get(key)
+            if current is None or scaled_sec < time_to_sec(current):
+                data.setdefault("best_efforts_auto", {})[key] = sec_to_hms(scaled_sec)
+                return key
+    return None
+
+
+def _classify_session_tag(summary: str) -> str:
+    tag_match = re.search(r'\[(.*?)\]', summary)
+    if tag_match:
+        return tag_match.group(1).upper()
+    upper = summary.upper()
+    for candidate in _QUALITY_TAGS:
+        if candidate in upper:
+            return candidate
+    return ""
+
+
+def _maybe_record_hr_point(data: dict, session_summary: str, pace_sec_per_km: float, avg_hr: float):
+    """Record an (HR, pace) point from a quality session for threshold-pace
+    estimation. Skips easy/long runs — those aren't run near threshold, so
+    including them would bias the trend toward slower paces."""
+    if not pace_sec_per_km or not avg_hr:
+        return
+    tag = _classify_session_tag(session_summary)
+    if tag not in _QUALITY_TAGS:
+        return
+    points = data.setdefault("hr_pace_points", [])
+    points.append({"date": today_str(), "pace_sec_per_km": pace_sec_per_km, "avg_hr": avg_hr, "tag": tag})
+    data["hr_pace_points"] = points[-_HR_POINTS_MAX:]
+
+
+def estimate_threshold_pace_sec(data: dict) -> float | None:
+    """Linear-fit pace (sec/km) vs avg HR from recent quality sessions, then
+    extrapolate pace at 88% max HR (a standard lactate-threshold marker).
+    Needs at least 4 points and a sane negative slope (pace should drop as
+    HR rises) to trust the fit — otherwise returns None and predictions fall
+    back to PB-only."""
+    points = data.get("hr_pace_points", [])
+    if len(points) < 4:
+        return None
+    hrs = [p["avg_hr"] for p in points]
+    paces = [p["pace_sec_per_km"] for p in points]
+    n = len(points)
+    mean_hr = sum(hrs) / n
+    mean_pace = sum(paces) / n
+    denom = sum((h - mean_hr) ** 2 for h in hrs)
+    if denom == 0:
+        return None
+    slope = sum((h - mean_hr) * (p - mean_pace) for h, p in zip(hrs, paces)) / denom
+    if slope >= 0:  # noisy/insufficient data — pace should fall as HR rises
+        return None
+    intercept = mean_pace - slope * mean_hr
+    threshold_pace = intercept + slope * (0.88 * MAX_HR)
+    # Sanity guardrail: discard wildly implausible extrapolations
+    if not (180 <= threshold_pace <= 720):  # 3:00/km to 12:00/km
+        return None
+    return threshold_pace
+
 
 def time_to_sec(t: str) -> float:
     parts = t.split(":")
@@ -852,22 +1013,37 @@ def sec_to_hms(s: float) -> str:
 
 def predict_race_times(data: dict) -> tuple:
     """
-    Estimate HM and FM finish times using Riegel formula from best 10K,
-    adjusted for training progression and Singapore heat.
+    Estimate HM and FM finish times. Blends two independent signals when
+    both are available:
+    1. Riegel formula from best 10K PB (auto-updated from logged runs),
+       plus a small bonus for weeks trained.
+    2. HR/pace trend from recent quality sessions, extrapolated to an
+       estimated threshold pace ≈ HM race pace for a trained recreational
+       runner — this one updates without needing an all-out PB effort.
+    Both adjusted for Singapore heat on race day.
     """
     completed = data.get("completed", {})
     weeks_trained = len(set(re.match(r"(w\d+)_", uid).group(1) for uid in completed if re.match(r"w\d+_", uid))) if completed else 0
 
-    # Base from actual 10K PB: 1:05:48
-    base_10k_sec = time_to_sec("1:05:48")
+    best_efforts = get_best_efforts(data)
+    base_10k_sec = time_to_sec(best_efforts["10K"])
 
-    # Training improvement: ~3 sec/km per 4 weeks consistent training
-    # Each completed week contributes a small improvement
-    improvement_per_km = min(weeks_trained, 20) * 0.75  # seconds per km
+    # Training improvement: ~0.75 sec/km per completed week, capped at 20 weeks —
+    # a modest supplementary bonus; the auto-updated PB and HR trend below are
+    # the primary signals now.
+    improvement_per_km = min(weeks_trained, 20) * 0.75
     adjusted_10k_sec = base_10k_sec - (improvement_per_km * 10)
 
     # Riegel: HM = 10K * (21.1/10)^1.06
-    hm_sec = adjusted_10k_sec * (21.1 / 10) ** 1.06
+    hm_sec_from_pb = adjusted_10k_sec * (21.1 / 10) ** 1.06
+
+    threshold_pace = estimate_threshold_pace_sec(data)
+    hr_trend_used = threshold_pace is not None
+    if hr_trend_used:
+        hm_sec_from_hr = threshold_pace * 21.1
+        hm_sec = (hm_sec_from_pb + hm_sec_from_hr) / 2
+    else:
+        hm_sec = hm_sec_from_pb
 
     # Singapore heat penalty on race day: +5 sec/km = +105 sec for HM
     hm_sec_race = hm_sec + 105
@@ -880,12 +1056,13 @@ def predict_race_times(data: dict) -> tuple:
     fm_h = int(fm_sec_race // 3600)
     fm_m = int((fm_sec_race % 3600) // 60)
 
-    return (hm_h, hm_m), (fm_h, fm_m), weeks_trained
+    return (hm_h, hm_m), (fm_h, fm_m), weeks_trained, hr_trend_used, len(data.get("hr_pace_points", []))
 
 
 async def show_predictions(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = load_data()
-    (hm_h, hm_m), (fm_h, fm_m), weeks = predict_race_times(data)
+    (hm_h, hm_m), (fm_h, fm_m), weeks, hr_trend_used, n_hr_points = predict_race_times(data)
+    best_efforts = get_best_efforts(data)
     completed = data.get("completed", {})
 
     # Conflict warning
@@ -896,30 +1073,38 @@ async def show_predictions(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
     # How close to targets
-    hm_target_min = 135  # 2:15
+    hm_target_min = 135  # 2:15 (Sep 27 half marathon target)
     hm_actual_min = hm_h * 60 + hm_m
     hm_gap = hm_actual_min - hm_target_min
     hm_gap_text = f"{abs(hm_gap)} min {'ahead of' if hm_gap < 0 else 'behind'} 2:15 target" if hm_gap != 0 else "exactly on 2:15 target"
 
-    fm_target_min = 285  # 4:45
+    fm_target_min = 285  # 4:45 (Dec 6 full marathon target)
     fm_actual_min = fm_h * 60 + fm_m
     fm_gap = fm_actual_min - fm_target_min
     fm_gap_text = f"{abs(fm_gap)} min {'ahead of' if fm_gap < 0 else 'behind'} sub-4:45 target" if fm_gap != 0 else "exactly on sub-4:45 target"
 
+    hr_note = (
+        f"_(blended: 10K PB + HR/pace trend from {n_hr_points} quality sessions)_"
+        if hr_trend_used else
+        f"_(based on 10K PB only — log {max(0, 4 - n_hr_points)} more tempo/track/MP sessions with HR visible to unlock HR-trend blending)_"
+    )
+
     text = (
         f"🔮 *Race Time Predictions*\n"
-        f"_(based on 10K PB {BEST_EFFORTS['10K']}, {weeks} weeks trained, SG heat adjusted)_\n\n"
+        f"_(10K PB {best_efforts['10K']}, {weeks} weeks trained, SG heat adjusted)_\n"
+        f"{hr_note}\n\n"
         f"*Current PBs:*\n"
-        f"5K: {BEST_EFFORTS['5K']} · 10K: {BEST_EFFORTS['10K']} · HM: {BEST_EFFORTS['HM']}\n\n"
+        f"5K: {best_efforts['5K']} · 10K: {best_efforts['10K']} · HM: {best_efforts['HM']}\n\n"
         f"🏃 *Half Marathon (21.1km)*\n"
         f"Predicted: *{hm_h}:{hm_m:02d}*\n"
         f"Sep 27 target: 2:15 → {hm_gap_text}\n\n"
         f"🏅 *Full Marathon (42.2km)*\n"
         f"Predicted: *{fm_h}:{fm_m:02d}*\n"
-        f"Dec 6 target: sub-5:00 → {fm_gap_text}\n\n"
+        f"Dec 6 target: sub-4:45 → {fm_gap_text}\n\n"
         f"*Nov 1 HM:* targeting 2:10 — needs strong Sep race + 5 more weeks\n"
         f"{conflict_warning}\n"
-        f"_Predictions improve as more sessions are logged and PBs update._"
+        f"_Predictions improve as more sessions are logged, PBs auto-update, "
+        f"and HR data accumulates from tempo/track/MP sessions._"
     )
 
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_menu_keyboard())
