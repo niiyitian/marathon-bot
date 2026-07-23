@@ -1935,24 +1935,27 @@ async def ask_coach_answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("🤔 Thinking...")
 
-    data = load_data()
-    wnum = current_week_num()
-    completed_count = len(data.get("completed", {}))
-    (hm_h, hm_m), (fm_h, fm_m), weeks = predict_race_times(data)
-
-    context = (
-        f"You are an experienced marathon running coach advising Yitian, a female runner based in Singapore.\n"
-        f"Current training: Week {wnum}/24 of BYD Marathon plan (Dec 6 2026, sub-4:45 target).\n"
-        f"Sessions completed: {completed_count}. Predicted HM: {hm_h}:{hm_m:02d}, FM: {fm_h}:{fm_m:02d}.\n"
-        f"Strava PBs: 5K 30:23, 10K 1:05:48, HM 2:27:45. Max HR: 184bpm. Avg sleep score: 68.\n"
-        f"Races: Sep 27 HM (target 2:15), Nov 1 HM (marathon effort), Nov 26 Hyrox, Dec 6 Full Marathon.\n"
-        f"Trains in Singapore heat (28-34°C, 70-90% humidity) — HR runs 5-10bpm higher than cool conditions.\n"
-        f"Shoes: ASICS Superblast 2 (training), On CloudMonster Hyper (race/tempo), Saucony Endorphin Speed (race), Adidas Evo SL (race).\n\n"
-        f"Answer directly and concisely. Be specific with numbers. "
-        f"Sound like a coach — firm, practical, no fluff. 3-5 sentences max unless a detailed breakdown is needed."
-    )
-
     try:
+        data = load_data()
+        wnum = current_week_num()
+        completed_count = len(data.get("completed", {}))
+        (hm_h, hm_m), (fm_h, fm_m), weeks, hr_trend_used, n_hr_points = predict_race_times(data)
+        best_efforts = get_best_efforts(data)
+
+        context = (
+            f"You are an experienced marathon running coach advising Yitian, a female runner based in Singapore.\n"
+            f"Current training: Week {wnum}/24 of BYD Marathon plan (Dec 6 2026, sub-4:45 target).\n"
+            f"Sessions completed: {completed_count}. Predicted HM: {hm_h}:{hm_m:02d}, FM: {fm_h}:{fm_m:02d} "
+            f"({'blended from PB + HR trend' if hr_trend_used else 'from 10K PB only'}).\n"
+            f"Current PBs — 5K {best_efforts['5K']}, 10K {best_efforts['10K']}, HM {best_efforts['HM']} "
+            f"(auto-updates from logged runs). Max HR: 184bpm. Avg sleep score: 68.\n"
+            f"Races: Sep 27 HM (target 2:15), Nov 1 HM (marathon effort), Nov 26 Hyrox, Dec 6 Full Marathon.\n"
+            f"Trains in Singapore heat (28-34°C, 70-90% humidity) — HR runs 5-10bpm higher than cool conditions.\n"
+            f"Shoes: ASICS Superblast 2 (training), On CloudMonster Hyper (race/tempo), Saucony Endorphin Speed (race), Adidas Evo SL (race).\n\n"
+            f"Answer directly and concisely. Be specific with numbers. "
+            f"Sound like a coach — firm, practical, no fluff. 3-5 sentences max unless a detailed breakdown is needed."
+        )
+
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 "https://api.anthropic.com/v1/messages",
