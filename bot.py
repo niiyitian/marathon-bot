@@ -1177,7 +1177,7 @@ async def show_weekly_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     done_this_week = [s for s in sessions if s[0] in completed]
     missed_this_week = [s for s in sessions if s[0] not in completed and date.fromisoformat(s[1]) < date.today()]
 
-    (hm_h, hm_m), (fm_h, fm_m), weeks = predict_race_times(data)
+    (hm_h, hm_m), (fm_h, fm_m), weeks, hr_trend_used, n_hr_points = predict_race_times(data)
 
     done_pct = len(done_this_week) / len(sessions) * 100 if sessions else 0
 
